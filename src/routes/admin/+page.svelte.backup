@@ -1,0 +1,1071 @@
+<!-- Admin Panel Page -->
+<script lang="ts">
+	import { onMount } from 'svelte';
+	import { getAllStudents, addStudent, deleteStudent, clearAllData, initDB, type Student } from '$lib/services/db';
+	import { detectFace, loadModels, getModelsLoaded } from '$lib/services/face';
+	import { generateQRCodeData, validateStudentID } from '$lib/services/qr';
+	import { validateName, validateEmail, validatePhone, validateProgram, validateYear, sanitizeInput } from '$lib/utils/validation';
+
+	let students = $state<Student[]>([]);
+	let loading = $state<boolean>(true);
+	let showAddForm = $state<boolean>(false);
+	let error = $state<string | null>(null);
+	let success = $state<string | null>(null);
+	let modelsLoaded = $state<boolean>(false);
+	let dbInitialized = $state<boolean>(false);
+
+	// Form fields
+	let formData = $state({
+		id: '',
+		name: '',
+		email: '',
+		phone: '',
+		program: '',
+		year: new Date().getFullYear()
+	});
+
+	let videoElement = $state<HTMLVideoElement>();
+	let stream = $state<MediaStream | null>(null);
+	let capturedDescriptor = $state<Float32Array | null>(null);
+
+	onMount(async () => {
+		await initDatabase();
+		await loadStudents();
+		await loadFaceModels();
+	});
+
+	async function initDatabase() {
+		if (dbInitialized) return; // Already initialized
+
+		try {
+			console.log('💾 Initializing database...');
+			await initDB();
+			dbInitialized = true;
+			console.log('✅ Database initialized successfully');
+		} catch (err) {
+			console.error('❌ Failed to initialize database:', err);
+			error = 'Failed to initialize database: ' + String(err);
+			throw err; // Re-throw to prevent further execution
+		}
+	}
+
+	async function loadFaceModels() {
+		try {
+			console.log('🤖 Loading face detection models...');
+			await loadModels((progress) => {
+				console.log(`📊 Model loading progress: ${progress}%`);
+			});
+			modelsLoaded = true;
+			console.log('✅ Face detection models loaded successfully');
+		} catch (err) {
+			console.error('❌ Failed to load face models:', err);
+			error = 'Failed to load face detection models: ' + String(err);
+		}
+	}
+
+	// Reactive effect to set video source when stream and element are both ready
+	$effect(() => {
+		if (stream && videoElement) {
+			videoElement.srcObject = stream;
+		}
+	});
+
+	async function loadStudents() {
+		try {
+			loading = true;
+			students = await getAllStudents();
+		} catch (err) {
+			error = 'Failed to load students: ' + String(err);
+		} finally {
+			loading = false;
+		}
+	}
+
+	async function startCamera() {
+		try {
+			stream = await navigator.mediaDevices.getUserMedia({
+				video: { facingMode: 'user', width: 640, height: 480 }
+			});
+		} catch (err) {
+			error = 'Camera access denied';
+		}
+	}
+
+	function stopCamera() {
+		if (stream) {
+			stream.getTracks().forEach(track => track.stop());
+			stream = null;
+		}
+	}
+
+	async function captureFace() {
+		if (!videoElement) {
+			error = 'Video element not available';
+			return;
+		}
+
+		if (!modelsLoaded) {
+			error = 'Face detection models are still loading. Please wait...';
+			return;
+		}
+
+		console.log('🎯 Starting face capture...');
+		console.log('Video element:', videoElement);
+		console.log('Video dimensions:', videoElement.videoWidth, 'x', videoElement.videoHeight);
+
+		try {
+			const canvas = document.createElement('canvas');
+			canvas.width = videoElement.videoWidth;
+			canvas.height = videoElement.videoHeight;
+			const ctx = canvas.getContext('2d');
+			if (!ctx) throw new Error('Canvas context not available');
+
+			ctx.drawImage(videoElement, 0, 0);
+
+			console.log('📸 Canvas created, detecting face...');
+			const detection = await detectFace(canvas);
+			console.log('🔍 Face detection result:', detection);
+
+			if (!detection) {
+				throw new Error('No face detected in the image. Please ensure your face is clearly visible and well-lit.');
+			}
+
+			if (!detection.descriptor) {
+				throw new Error('Face detected but no descriptor generated');
+			}
+
+			capturedDescriptor = detection.descriptor;
+			console.log('✅ Face captured successfully, descriptor length:', capturedDescriptor?.length);
+			success = 'Face captured successfully!';
+			error = null;
+		} catch (err) {
+			console.error('❌ Face capture error:', err);
+			error = 'Failed to capture face: ' + String(err);
+			success = null;
+		}
+	}
+
+	async function handleSubmit() {
+		console.log('📝 Starting student registration...');
+		error = null;
+		success = null;
+
+		// Ensure database is initialized
+		try {
+			await initDatabase();
+		} catch (initErr) {
+			console.error('❌ Database initialization failed:', initErr);
+			error = 'Database initialization failed: ' + String(initErr);
+			return;
+		}
+
+		// Validate inputs
+		if (!validateStudentID(formData.id)) {
+			error = 'Invalid Student ID format (5-20 alphanumeric characters)';
+			console.log('❌ Invalid student ID:', formData.id);
+			return;
+		}
+
+		if (!validateName(formData.name)) {
+			error = 'Invalid name format';
+			console.log('❌ Invalid name:', formData.name);
+			return;
+		}
+
+		if (!validateEmail(formData.email)) {
+			error = 'Invalid email format';
+			console.log('❌ Invalid email:', formData.email);
+			return;
+		}
+
+		if (formData.phone && !validatePhone(formData.phone)) {
+			error = 'Invalid phone format';
+			console.log('❌ Invalid phone:', formData.phone);
+			return;
+		}
+
+		if (formData.program && !validateProgram(formData.program)) {
+			error = 'Invalid program format';
+			console.log('❌ Invalid program:', formData.program);
+			return;
+		}
+
+		if (!validateYear(formData.year)) {
+			error = 'Invalid year';
+			console.log('❌ Invalid year:', formData.year);
+			return;
+		}
+
+		if (!capturedDescriptor) {
+			error = 'Please capture a face photo first';
+			console.log('❌ No face descriptor captured');
+			return;
+		}
+
+		console.log('✅ All validations passed, creating student...');
+
+		try {
+			const qrCodeData = generateQRCodeData(formData.id);
+			console.log('📱 Generated QR code:', qrCodeData);
+
+			const newStudent: Omit<Student, 'createdAt' | 'updatedAt'> = {
+				id: sanitizeInput(formData.id),
+				name: sanitizeInput(formData.name),
+				email: sanitizeInput(formData.email),
+				phone: formData.phone ? sanitizeInput(formData.phone) : undefined,
+				program: formData.program ? sanitizeInput(formData.program) : undefined,
+				year: formData.year,
+				faceDescriptor: capturedDescriptor,
+				qrCodeData: qrCodeData,
+				consentGiven: true,
+				consentDate: new Date()
+			};
+
+			console.log('💾 Saving student to database...');
+			console.log('📋 Student data:', {
+				id: newStudent.id,
+				name: newStudent.name,
+				email: newStudent.email,
+				hasFaceDescriptor: !!newStudent.faceDescriptor,
+				descriptorLength: newStudent.faceDescriptor?.length,
+				qrCodeData: newStudent.qrCodeData
+			});
+
+			await addStudent(newStudent);
+			console.log('✅ Student saved successfully');
+
+			success = 'Student added successfully!';
+			resetForm();
+			await loadStudents();
+		} catch (err) {
+			console.error('❌ Registration error:', err);
+			const errorObj = err as Error;
+			console.error('❌ Error details:', {
+				message: errorObj.message,
+				stack: errorObj.stack,
+				name: errorObj.name
+			});
+			error = 'Failed to add student: ' + String(err);
+		}
+	}
+
+	function resetForm() {
+		formData = {
+			id: '',
+			name: '',
+			email: '',
+			phone: '',
+			program: '',
+			year: new Date().getFullYear()
+		};
+		capturedDescriptor = null;
+		stopCamera();
+		showAddForm = false;
+	}
+
+	// Development helper: Fill form with test data
+	function fillTestData() {
+		const timestamp = Date.now();
+		const randomNum = Math.floor(Math.random() * 1000);
+		
+		formData = {
+			id: `STU-${randomNum}`,
+			name: `Test Student ${randomNum}`,
+			email: `student${randomNum}@test.edu`,
+			phone: `+1234567${String(randomNum).padStart(4, '0')}`,
+			program: 'Computer Science',
+			year: 2024
+		};
+		
+		success = 'Test data filled! Now capture a face.';
+	}
+
+	async function handleDelete(id: string) {
+		if (!confirm('Are you sure you want to delete this student?')) return;
+
+		try {
+			await deleteStudent(id);
+			success = 'Student deleted successfully';
+			await loadStudents();
+		} catch (err) {
+			error = 'Failed to delete student: ' + String(err);
+		}
+	}
+
+	async function handleClearAll() {
+		if (!confirm('WARNING: This will delete ALL student data. Are you sure?')) return;
+		if (!confirm('This action cannot be undone. Continue?')) return;
+
+		try {
+			await clearAllData();
+			success = 'All data cleared successfully';
+			await loadStudents();
+		} catch (err) {
+			error = 'Failed to clear data: ' + String(err);
+		}
+	}
+</script>
+
+<svelte:head>
+	<title>Admin Panel - Student Verification</title>
+</svelte:head>
+
+<div class="admin-container">
+	<!-- Header -->
+	<header class="header">
+		<div class="logo-box">
+			<span class="logo-text">AD</span>
+		</div>
+		<h1 class="brand">ADMIN PANEL</h1>
+		<a href="/" class="btn-header">BACK TO APP</a>
+	</header>
+
+	<!-- Alert Bar -->
+	<div class="alert-bar">
+		<p class="alert-text">⚠ GDPR COMPLIANT - ALL DATA ENCRYPTED WITH AES-256-GCM</p>
+	</div>
+
+	<!-- Main Content -->
+	<main class="main-content">
+		<!-- Stats -->
+		<section class="stats-section">
+			<div class="stat-card">
+				<h3 class="stat-label">TOTAL STUDENTS</h3>
+				<p class="stat-value">{students.length}</p>
+			</div>
+			<div class="stat-card">
+				<h3 class="stat-label">CONSENTED</h3>
+				<p class="stat-value">{students.filter(s => s.consentGiven).length}</p>
+			</div>
+			<div class="stat-card">
+				<h3 class="stat-label">DATABASE</h3>
+				<p class="stat-value">ENCRYPTED</p>
+			</div>
+		</section>
+
+		<!-- Actions -->
+		<section class="actions-section">
+			<button class="btn-add" onclick={() => showAddForm = !showAddForm}>
+				{showAddForm ? 'CANCEL' : '+ ADD STUDENT'}
+			</button>
+			<button class="btn-danger-outline" onclick={handleClearAll}>
+				CLEAR ALL DATA
+			</button>
+		</section>
+
+		<!-- Messages -->
+		{#if error}
+			<div class="error-box">
+				<p class="message-text">{error}</p>
+			</div>
+		{/if}
+
+		{#if success}
+			<div class="success-box">
+				<p class="message-text">{success}</p>
+			</div>
+		{/if}
+
+		<!-- Add Student Form -->
+		{#if showAddForm}
+			<section class="form-section">
+				<div class="section-header">
+					<h2 class="section-title">ADD NEW STUDENT</h2>
+					<button type="button" class="btn-autofill" onclick={fillTestData}>
+						🎲 AUTO-FILL TEST DATA
+					</button>
+				</div>
+
+				<form onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}>
+					<div class="form-grid">
+						<div class="form-group">
+							<label class="form-label">STUDENT ID*</label>
+							<input
+								type="text"
+								class="form-input"
+								bind:value={formData.id}
+								placeholder="STU-12345"
+								required
+							/>
+						</div>
+
+						<div class="form-group">
+							<label class="form-label">FULL NAME*</label>
+							<input
+								type="text"
+								class="form-input"
+								bind:value={formData.name}
+								placeholder="John Doe"
+								required
+							/>
+						</div>
+
+						<div class="form-group">
+							<label class="form-label">EMAIL*</label>
+							<input
+								type="email"
+								class="form-input"
+								bind:value={formData.email}
+								placeholder="student@university.edu"
+								required
+							/>
+						</div>
+
+						<div class="form-group">
+							<label class="form-label">PHONE</label>
+							<input
+								type="tel"
+								class="form-input"
+								bind:value={formData.phone}
+								placeholder="+1234567890"
+							/>
+						</div>
+
+						<div class="form-group">
+							<label class="form-label">PROGRAM</label>
+							<input
+								type="text"
+								class="form-input"
+								bind:value={formData.program}
+								placeholder="Computer Science"
+							/>
+						</div>
+
+						<div class="form-group">
+							<label class="form-label">YEAR</label>
+							<input
+								type="number"
+								class="form-input"
+								bind:value={formData.year}
+								min="1900"
+								max={new Date().getFullYear() + 10}
+							/>
+						</div>
+					</div>
+
+					<!-- Camera Section -->
+					<div class="camera-section">
+						<h3 class="subsection-title">CAPTURE FACE*</h3>
+
+						{#if !modelsLoaded}
+							<div class="model-loading">
+								<p class="loading-text">🤖 LOADING FACE DETECTION MODELS...</p>
+							</div>
+						{:else if !stream}
+							<button type="button" class="btn-camera" onclick={startCamera}>
+								START CAMERA
+							</button>
+						{:else}
+							<div class="video-container">
+								<video bind:this={videoElement} autoplay playsinline class="video-preview"></video>
+							</div>
+							<div class="camera-actions">
+								<button type="button" class="btn-capture" onclick={captureFace}>
+									CAPTURE FACE
+								</button>
+								<button type="button" class="btn-danger-outline" onclick={stopCamera}>
+									STOP CAMERA
+								</button>
+							</div>
+						{/if}
+
+						{#if capturedDescriptor}
+							<div class="capture-success">
+								<p class="success-text">✓ FACE CAPTURED ({capturedDescriptor.length} descriptors)</p>
+							</div>
+						{/if}
+					</div>
+
+					<!-- Submit -->
+					<button type="submit" class="btn-submit" disabled={!dbInitialized || !modelsLoaded}>
+						{!dbInitialized ? 'INITIALIZING DATABASE...' : !modelsLoaded ? 'LOADING MODELS...' : 'REGISTER STUDENT'}
+					</button>
+				</form>
+			</section>
+		{/if}
+
+		<!-- Student List -->
+		<section class="list-section">
+			<h2 class="section-title">REGISTERED STUDENTS ({students.length})</h2>
+
+			{#if loading}
+				<div class="loading-box">
+					<p class="loading-text">LOADING...</p>
+				</div>
+			{:else if students.length === 0}
+				<div class="empty-box">
+					<p class="empty-text">NO STUDENTS REGISTERED</p>
+				</div>
+			{:else}
+				<div class="student-list">
+					{#each students as student}
+						<div class="student-card">
+							<div class="student-header">
+								<h3 class="student-name">{student.name}</h3>
+								<button class="btn-delete" onclick={() => handleDelete(student.id)}>
+									DELETE
+								</button>
+							</div>
+							<div class="student-details">
+								<p class="detail-item"><strong>ID:</strong> {student.id}</p>
+								<p class="detail-item"><strong>EMAIL:</strong> {student.email}</p>
+								{#if student.phone}
+									<p class="detail-item"><strong>PHONE:</strong> {student.phone}</p>
+								{/if}
+								{#if student.program}
+									<p class="detail-item"><strong>PROGRAM:</strong> {student.program}</p>
+								{/if}
+								{#if student.year}
+									<p class="detail-item"><strong>YEAR:</strong> {student.year}</p>
+								{/if}
+								<p class="detail-item"><strong>QR CODE:</strong> {student.qrCodeData}</p>
+								<p class="detail-item">
+									<strong>CONSENT:</strong> {student.consentGiven ? '✓ GIVEN' : '✗ NOT GIVEN'}
+								</p>
+								<p class="detail-item"><strong>REGISTERED:</strong> {new Date(student.createdAt).toLocaleString()}</p>
+							</div>
+						</div>
+					{/each}
+				</div>
+			{/if}
+		</section>
+	</main>
+
+	<!-- Footer -->
+	<footer class="footer">
+		<p class="footer-text">Motherduc Design System © 2025 | GDPR Compliant</p>
+	</footer>
+</div>
+
+<style>
+	:global(body) {
+		margin: 0;
+		padding: 0;
+		font-family: 'JetBrains Mono', monospace;
+		background: #f4efea;
+		color: #383838;
+	}
+
+	.admin-container {
+		min-height: 100vh;
+		display: flex;
+		flex-direction: column;
+	}
+
+	/* Header */
+	.header {
+		display: flex;
+		align-items: center;
+		gap: 16px;
+		padding: 16px 32px;
+		background: #f4efea;
+		border-bottom: 2px solid #383838;
+	}
+
+	.logo-box {
+		width: 44px;
+		height: 44px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border: 2px solid #383838;
+		background: #ff3b30;
+	}
+
+	.logo-text {
+		font-size: 20px;
+		font-weight: bold;
+		color: #ffffff;
+	}
+
+	.brand {
+		font-size: 24px;
+		font-weight: bold;
+		text-transform: uppercase;
+		letter-spacing: 1px;
+		margin: 0;
+		flex: 1;
+	}
+
+	.btn-header {
+		padding: 8px 16px;
+		background: #007aff;
+		color: #ffffff;
+		border: 2px solid #383838;
+		text-decoration: none;
+		font-size: 14px;
+		font-weight: bold;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		transition: all 0.15s ease;
+	}
+
+	.btn-header:hover {
+		background: #0051d5;
+		transform: translateY(-2px);
+		box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+	}
+
+	/* Alert Bar */
+	.alert-bar {
+		background: #ff3b30;
+		border-bottom: 2px solid #383838;
+		padding: 12px;
+		text-align: center;
+	}
+
+	.alert-text {
+		font-size: 14px;
+		font-weight: bold;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		margin: 0;
+		color: #ffffff;
+	}
+
+	/* Main Content */
+	.main-content {
+		flex: 1;
+		max-width: 1200px;
+		width: 100%;
+		margin: 0 auto;
+		padding: 64px 32px;
+	}
+
+	/* Stats Section */
+	.stats-section {
+		display: grid;
+		grid-template-columns: repeat(3, 1fr);
+		gap: 16px;
+		margin-bottom: 32px;
+	}
+
+	.stat-card {
+		background: #ffffff;
+		border: 2px solid #383838;
+		padding: 24px;
+		transition: all 0.15s ease;
+	}
+
+	.stat-card:hover {
+		border-color: #007aff;
+		transform: translateY(-2px);
+	}
+
+	.stat-label {
+		font-size: 12px;
+		font-weight: bold;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		margin: 0 0 8px 0;
+		color: #888888;
+	}
+
+	.stat-value {
+		font-size: 32px;
+		font-weight: bold;
+		margin: 0;
+		color: #007aff;
+	}
+
+	/* Actions Section */
+	.actions-section {
+		display: flex;
+		gap: 16px;
+		margin-bottom: 32px;
+	}
+
+	.btn-add {
+		padding: 16px 32px;
+		background: #34c759;
+		color: #ffffff;
+		border: 2px solid #383838;
+		font-family: 'JetBrains Mono', monospace;
+		font-size: 14px;
+		font-weight: bold;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.btn-add:hover {
+		background: #28a745;
+		transform: translateY(-2px);
+		box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+	}
+
+	.btn-danger-outline {
+		padding: 16px 32px;
+		background: transparent;
+		color: #ff3b30;
+		border: 2px solid #ff3b30;
+		font-family: 'JetBrains Mono', monospace;
+		font-size: 14px;
+		font-weight: bold;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.btn-danger-outline:hover {
+		background: #ff3b30;
+		color: #ffffff;
+		transform: translateY(-2px);
+		box-shadow: 0 4px 8px rgba(255, 59, 48, 0.3);
+	}
+
+	/* Messages */
+	.error-box,
+	.success-box {
+		padding: 16px;
+		border: 2px solid #383838;
+		margin-bottom: 32px;
+	}
+
+	.error-box {
+		background: #ff3b30;
+		color: #ffffff;
+	}
+
+	.success-box {
+		background: #34c759;
+		color: #ffffff;
+	}
+
+	.message-text {
+		font-size: 14px;
+		font-weight: bold;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		margin: 0;
+	}
+
+	/* Form Section */
+	.form-section {
+		background: #ffffff;
+		border: 2px solid #383838;
+		padding: 32px;
+		margin-bottom: 32px;
+	}
+
+	.section-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		margin-bottom: 24px;
+		padding-bottom: 16px;
+		border-bottom: 2px solid #383838;
+	}
+
+	.section-title {
+		font-size: 18px;
+		font-weight: bold;
+		text-transform: uppercase;
+		letter-spacing: 0.6px;
+		margin: 0;
+	}
+
+	.btn-autofill {
+		padding: 8px 16px;
+		background: #ffe100;
+		color: #383838;
+		border: 2px solid #383838;
+		font-family: 'JetBrains Mono', monospace;
+		font-size: 12px;
+		font-weight: bold;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.btn-autofill:hover {
+		background: #ffd700;
+		transform: translateY(-2px);
+		box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+	}
+
+	.form-grid {
+		display: grid;
+		grid-template-columns: repeat(2, 1fr);
+		gap: 16px;
+		margin-bottom: 32px;
+	}
+
+	.form-group {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.form-label {
+		font-size: 12px;
+		font-weight: bold;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		color: #383838;
+	}
+
+	.form-input {
+		padding: 12px;
+		background: #f4efea;
+		border: 2px solid #383838;
+		font-family: 'JetBrains Mono', monospace;
+		font-size: 14px;
+		color: #383838;
+		transition: border-color 0.15s ease;
+	}
+
+	.form-input:focus {
+		outline: none;
+		border-color: #007aff;
+	}
+
+	/* Camera Section */
+	.camera-section {
+		margin-bottom: 32px;
+		padding: 24px;
+		background: #f4efea;
+		border: 2px solid #383838;
+	}
+
+	.subsection-title {
+		font-size: 14px;
+		font-weight: bold;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		margin: 0 0 16px 0;
+	}
+
+	.video-container {
+		margin-bottom: 16px;
+		border: 2px solid #383838;
+	}
+
+	.video-preview {
+		width: 100%;
+		height: auto;
+		display: block;
+	}
+
+	.camera-actions {
+		display: flex;
+		gap: 16px;
+	}
+
+	.btn-camera,
+	.btn-capture {
+		flex: 1;
+		padding: 12px 24px;
+		background: #007aff;
+		color: #ffffff;
+		border: 2px solid #383838;
+		font-family: 'JetBrains Mono', monospace;
+		font-size: 14px;
+		font-weight: bold;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.btn-camera:hover,
+	.btn-capture:hover {
+		background: #0051d5;
+		transform: translateY(-2px);
+		box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+	}
+
+	.model-loading {
+		padding: 24px;
+		background: #007aff;
+		border: 2px solid #383838;
+		text-align: center;
+		margin-bottom: 16px;
+	}
+
+	.model-loading .loading-text {
+		font-size: 14px;
+		font-weight: bold;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		color: #ffffff;
+		margin: 0;
+	}
+
+	.btn-submit {
+		width: 100%;
+		padding: 16px 32px;
+		background: #34c759;
+		color: #ffffff;
+		border: 2px solid #383838;
+		font-family: 'JetBrains Mono', monospace;
+		font-size: 14px;
+		font-weight: bold;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.btn-submit:hover:not(:disabled) {
+		background: #28a745;
+		transform: translateY(-2px);
+		box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+	}
+
+	.btn-submit:disabled {
+		background: #cccccc;
+		color: #666666;
+		cursor: not-allowed;
+		transform: none;
+		box-shadow: none;
+	}
+
+	/* List Section */
+	.list-section {
+		background: #ffffff;
+		border: 2px solid #383838;
+		padding: 32px;
+	}
+
+	.loading-box,
+	.empty-box {
+		padding: 64px;
+		text-align: center;
+	}
+
+	.loading-text,
+	.empty-text {
+		font-size: 14px;
+		font-weight: bold;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		color: #888888;
+		margin: 0;
+	}
+
+	.student-list {
+		display: flex;
+		flex-direction: column;
+		gap: 16px;
+	}
+
+	.student-card {
+		background: #f4efea;
+		border: 2px solid #383838;
+		padding: 24px;
+	}
+
+	.student-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		margin-bottom: 16px;
+		padding-bottom: 16px;
+		border-bottom: 2px solid #383838;
+	}
+
+	.student-name {
+		font-size: 16px;
+		font-weight: bold;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		margin: 0;
+	}
+
+	.btn-delete {
+		padding: 8px 16px;
+		background: transparent;
+		color: #ff3b30;
+		border: 2px solid #ff3b30;
+		font-family: 'JetBrains Mono', monospace;
+		font-size: 12px;
+		font-weight: bold;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.btn-delete:hover {
+		background: #ff3b30;
+		color: #ffffff;
+		transform: translateY(-2px);
+		box-shadow: 0 4px 8px rgba(255, 59, 48, 0.3);
+	}
+
+	.student-details {
+		display: grid;
+		grid-template-columns: repeat(2, 1fr);
+		gap: 8px;
+	}
+
+	.detail-item {
+		font-size: 12px;
+		line-height: 1.6;
+		margin: 0;
+	}
+
+	.detail-item strong {
+		font-weight: bold;
+		text-transform: uppercase;
+	}
+
+	/* Footer */
+	.footer {
+		background: #383838;
+		color: #ffffff;
+		padding: 32px;
+		text-align: center;
+		border-top: 2px solid #383838;
+	}
+
+	.footer-text {
+		font-size: 12px;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		margin: 0;
+	}
+
+	/* Responsive */
+	@media (max-width: 728px) {
+		.stats-section,
+		.form-grid,
+		.student-details {
+			grid-template-columns: 1fr;
+		}
+
+		.section-header {
+			flex-direction: column;
+			align-items: flex-start;
+			gap: 16px;
+		}
+
+		.btn-autofill {
+			width: 100%;
+		}
+
+		.main-content {
+			padding: 32px 16px;
+		}
+
+		.header {
+			padding: 16px;
+		}
+
+		.brand {
+			font-size: 18px;
+		}
+
+		.actions-section {
+			flex-direction: column;
+		}
+
+		.camera-actions {
+			flex-direction: column;
+		}
+	}
+</style>
