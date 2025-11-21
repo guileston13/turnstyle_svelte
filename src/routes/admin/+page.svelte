@@ -136,7 +136,7 @@ async function loadStudents() {
 		if (!ctx) return '';
 		
 		ctx.drawImage(videoElement, 0, 0, TARGET_WIDTH, TARGET_HEIGHT);
-		return canvasElement.toDataURL('image/jpeg', 0.6);
+		return canvasElement.toDataURL('image/jpeg', 0.92);
 	}
 
 	async function checkOrientation(): Promise<string> {
@@ -205,6 +205,12 @@ async function loadStudents() {
 			error = 'Please capture all 3 pictures';
 			return;
 		}
+
+		console.log('📤 Sending registration with images:', {
+			pic1Length: capturedImages.pic1.length,
+			pic2Length: capturedImages.pic2.length,
+			pic3Length: capturedImages.pic3.length
+		});
 
 		try {
 			const payload = {

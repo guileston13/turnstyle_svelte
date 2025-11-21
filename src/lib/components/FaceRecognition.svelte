@@ -25,6 +25,7 @@
 		studentStore.verificationStatus = 'recognizing';
 		resultMessage = '';
 		resultType = '';
+		studentStore.errorMessage = '';
 
 		try {
 			console.log('📸 Capturing frame from video...');
@@ -32,7 +33,7 @@
 			console.log('📸 Frame captured');
 
 			// Convert canvas to base64 for API
-			const imageData = canvas.toDataURL('image/jpeg', 0.8);
+			const imageData = canvas.toDataURL('image/jpeg', 0.92);
 
 			console.log('🔍 Sending to recognition API...');
 			const response = await fetch('/api/face/recognize', {
@@ -68,7 +69,6 @@
 				resultMessage = data.message || '❌ Face not recognized';
 				resultType = 'error';
 				studentStore.verificationStatus = 'failed';
-				studentStore.errorMessage = handleError(ErrorType.FACE_NO_MATCH);
 			}
 		} catch (err) {
 			console.error('❌ Face recognition error:', err);
@@ -88,13 +88,13 @@
 	<div class="instruction-box">
 		<h3 class="instruction-title">FACE RECOGNITION</h3>
 		<p class="instruction-text">
-			Position your face clearly in front of the camera and click "RECOGNIZE FACE" to identify yourself.
+			Position your face clearly in front of the camera. Recognition will start automatically every 3 seconds.
 		</p>
+		<div class="auto-scan-indicator">
+			<div class="scan-dot"></div>
+			<span class="scan-text">AUTO-SCANNING ACTIVE</span>
+		</div>
 	</div>
-
-	<button class="btn-recognize" onclick={performFaceRecognition} disabled={recognizing}>
-		{recognizing ? 'RECOGNIZING...' : '🔍 RECOGNIZE FACE'}
-	</button>
 
 	{#if resultMessage}
 		<div class="result-box {resultType}">
@@ -143,31 +143,6 @@
 		color: #383838;
 		margin: 0;
 		line-height: 1.4;
-	}
-
-	.btn-recognize {
-		padding: 16px 32px;
-		font-family: 'JetBrains Mono', monospace;
-		font-size: 14px;
-		font-weight: bold;
-		text-transform: uppercase;
-		letter-spacing: 0.5px;
-		background: #007aff;
-		color: #ffffff;
-		border: 2px solid #383838;
-		cursor: pointer;
-		transition: all 0.15s ease;
-	}
-
-	.btn-recognize:hover:not(:disabled) {
-		background: #0051d5;
-		transform: translateY(-2px);
-		box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
-	}
-
-	.btn-recognize:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
 	}
 
 	.result-box {
@@ -228,5 +203,44 @@
 		letter-spacing: 0.5px;
 		color: #007aff;
 		margin: 0;
+	}
+
+	.auto-scan-indicator {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 8px;
+		margin-top: 12px;
+		padding: 8px;
+		background: #007aff;
+		border: 2px solid #383838;
+	}
+
+	.scan-dot {
+		width: 10px;
+		height: 10px;
+		border-radius: 50%;
+		background: #34c759;
+		animation: pulse 2s ease-in-out infinite;
+	}
+
+	@keyframes pulse {
+		0%, 100% {
+			opacity: 1;
+			transform: scale(1);
+		}
+		50% {
+			opacity: 0.5;
+			transform: scale(1.2);
+		}
+	}
+
+	.scan-text {
+		font-family: 'JetBrains Mono', monospace;
+		font-size: 11px;
+		font-weight: bold;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		color: #ffffff;
 	}
 </style>

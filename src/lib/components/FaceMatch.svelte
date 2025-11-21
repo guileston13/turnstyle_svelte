@@ -6,17 +6,27 @@
 	import { ErrorType, handleError } from '../utils/error-handler';
 	import type { Student } from '../services/db';
 
-	let { videoElement, student }: { videoElement: HTMLVideoElement; student: Student } = $props();
+	let { videoElement, student, onComplete }: { 
+		videoElement: HTMLVideoElement; 
+		student: Student;
+		onComplete?: (success: boolean) => void;
+	} = $props();
 
 	let matching = $state<boolean>(false);
 	let resultMessage = $state<string>('');
 	let resultType = $state<'success' | 'error' | ''>('');
 	let verificationInterval = $state<number | null>(null);
+	let verificationComplete = $state<boolean>(false);
 
 	const VERIFICATION_INTERVAL = 3000; // 3 seconds
 
 	let performFaceMatch = async () => {
 		console.log('🎯 Starting automatic face match...');
+
+		// Stop if already completed
+		if (verificationComplete) {
+			return;
+		}
 
 		if (!videoElement || !student) {
 			console.error('❌ Missing videoElement or student');
@@ -27,6 +37,8 @@
 			console.error('❌ Student has no face descriptor');
 			resultMessage = '✗ ERROR: Student has no stored face data';
 			resultType = 'error';
+			stopAutoVerification();
+			if (onComplete) onComplete(false);
 			return;
 		}
 
@@ -37,27 +49,21 @@
 
 		matching = true;
 		studentStore.verificationStatus = 'face_matching';
-		// Keep previous result message during matching
 
 		try {
 			console.log('📸 Capturing frame from video...');
-			// Capture frame from video
 			const canvas = await captureFrame(videoElement);
-			console.log('📸 Frame captured:', canvas);
+			console.log('📸 Frame captured');
 
 			console.log('🔍 Detecting face...');
-			// Detect face in captured frame
 			const detection = await detectFace(canvas);
-			console.log('🔍 Detection result:', detection);
 
 			if (!detection) {
-				// Don't show error for no face detected, just silently continue
 				console.log('⚠️ No face detected, will retry...');
 				return;
 			}
 
 			console.log('⚖️ Comparing faces...');
-			// Compare with stored descriptor
 			const result = await compareFaces(detection.descriptor, student.faceDescriptor);
 			console.log('⚖️ Comparison result:', result);
 
@@ -67,11 +73,24 @@
 				resultMessage = `✓ FACE MATCH CONFIRMED (${(result.confidence * 100).toFixed(1)}% confidence)`;
 				resultType = 'success';
 				studentStore.verificationStatus = 'success';
+				verificationComplete = true;
+				
+				// Stop verification and notify parent
+				stopAutoVerification();
+				if (onComplete) {
+					setTimeout(() => onComplete(true), 1000); // Small delay to show success message
+				}
 			} else {
 				resultMessage = `✗ FACE DOES NOT MATCH (${(result.confidence * 100).toFixed(1)}% confidence)`;
 				resultType = 'error';
 				studentStore.verificationStatus = 'failed';
 				studentStore.errorMessage = handleError(ErrorType.FACE_NO_MATCH);
+				
+				// Stop after failed match
+				stopAutoVerification();
+				if (onComplete) {
+					setTimeout(() => onComplete(false), 2000);
+				}
 			}
 		} catch (err) {
 			console.error('❌ Face match error:', err);

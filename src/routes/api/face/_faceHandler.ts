@@ -50,7 +50,7 @@ function imageFromBase64(base64: string): Promise<any> {
 }
 
 const mtcnnOptions = new faceapi.MtcnnOptions({
-	minFaceSize: 100,
+	minFaceSize: 50,
 	scaleFactor: 0.709
 });
 
@@ -108,6 +108,13 @@ export async function handleRegister(request: Request): Promise<Response> {
 	try {
 		const { id, name, images } = await request.json();
 
+		console.log('📥 Registration request received:', {
+			id,
+			name,
+			hasImages: !!images,
+			imageKeys: images ? Object.keys(images) : []
+		});
+
 		if (!id || !name || !images) {
 			return new Response(JSON.stringify({ message: '❌ Missing required fields' }), {
 				status: 400,
@@ -133,7 +140,10 @@ export async function handleRegister(request: Request): Promise<Response> {
 				continue;
 			}
 
+			console.log(`🔍 Processing image ${i}, size: ${images[imageKey].length} chars`);
 			const img = await imageFromBase64(images[imageKey]);
+			console.log(`✅ Image ${i} loaded: ${img.width}x${img.height}`);
+			
 			const detection = await faceapi
 				.detectSingleFace(img, mtcnnOptions)
 				.withFaceLandmarks()
@@ -144,6 +154,7 @@ export async function handleRegister(request: Request): Promise<Response> {
 				continue;
 			}
 
+			console.log(`✅ Face detected in image ${i}`);
 			descriptors.push(Array.from(detection.descriptor));
 			const imageBuffer = bufferFromBase64(images[imageKey]);
 			fs.writeFileSync(path.join(FACE_DIR, `${id}_pic${i}.png`), imageBuffer);
@@ -216,6 +227,9 @@ export async function handleRegister(request: Request): Promise<Response> {
 export async function handleRecognize(request: Request): Promise<Response> {
 	await ensureModelsLoaded();
 	try {
+		const timestamp = new Date().toLocaleTimeString();
+		console.log(`\n🔍 [${timestamp}] Recognition request received`);
+		
 		const { image } = await request.json();
 
 		if (!image) {
@@ -225,10 +239,10 @@ export async function handleRecognize(request: Request): Promise<Response> {
 			});
 		}
 
-		console.log('🔍 Processing recognition request, image length:', image.length);
+		console.log(`📸 [${timestamp}] Processing image, length: ${image.length} chars`);
 
 		const img = await imageFromBase64(image);
-		console.log('✅ Image loaded successfully, dimensions:', img.width, 'x', img.height);
+		console.log(`✅ [${timestamp}] Image loaded: ${img.width}x${img.height}`);
 
 		const detection = await faceapi
 			.detectSingleFace(img, mtcnnOptions)
@@ -236,20 +250,21 @@ export async function handleRecognize(request: Request): Promise<Response> {
 			.withFaceDescriptor();
 
 		if (!detection) {
-			console.log('❌ No face detected in image');
+			console.log(`⚠️ [${timestamp}] No face detected in image`);
 			return new Response(JSON.stringify({ message: '❌ No face detected' }), {
 				status: 200,
 				headers: { 'Content-Type': 'application/json' }
 			});
 		}
 
-		console.log('✅ Face detected, computing descriptor...');
+		console.log(`✅ [${timestamp}] Face detected, comparing with database...`);
 		const queryDescriptor = detection.descriptor;
 		let bestMatch: string | null = null;
 		let bestDistance = Infinity;
 
 		// Check all registered students
 		const descFiles = fs.readdirSync(DESC_DIR).filter(f => f.endsWith('.json'));
+		console.log(`📚 [${timestamp}] Checking against ${descFiles.length} registered students`);
 
 		for (const descFile of descFiles) {
 			const studentId = descFile.replace('.json', '');
@@ -268,6 +283,7 @@ export async function handleRecognize(request: Request): Promise<Response> {
 			}
 		}
 
+		const timestamp2 = new Date().toLocaleTimeString();
 		if (bestMatch && bestDistance < 0.6) {
 			// Get student name from students table
 			let studentName = bestMatch;
@@ -282,6 +298,9 @@ export async function handleRecognize(request: Request): Promise<Response> {
 				console.error('Error fetching student name:', nameError);
 			}
 
+			console.log(`✅ [${timestamp2}] MATCH FOUND: ${studentName} (ID: ${bestMatch})`);
+			console.log(`   Distance: ${bestDistance.toFixed(3)}, Confidence: ${((1 - bestDistance) * 100).toFixed(1)}%`);
+
 			return new Response(JSON.stringify({
 				message: `✅ Welcome back, ${studentName}!`,
 				studentId: bestMatch,
@@ -293,6 +312,7 @@ export async function handleRecognize(request: Request): Promise<Response> {
 				headers: { 'Content-Type': 'application/json' }
 			});
 		} else {
+			console.log(`❌ [${timestamp2}] NO MATCH - Best distance: ${bestDistance.toFixed(3)} (threshold: 0.6)`);
 			return new Response(JSON.stringify({
 				message: '🚫 Face not recognized',
 				bestDistance: bestDistance.toFixed(3)
