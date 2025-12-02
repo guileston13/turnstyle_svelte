@@ -1,0 +1,126 @@
+/*
+ Navicat Premium Data Transfer
+
+ Source Server         : localhost
+ Source Server Type    : MariaDB
+ Source Server Version : 120002
+ Source Host           : localhost:3306
+ Source Schema         : student_verification
+
+ Target Server Type    : MariaDB
+ Target Server Version : 120002
+ File Encoding         : 65001
+
+ Date: 02/12/2025 10:43:00
+*/
+
+SET NAMES utf8mb4;
+SET FOREIGN_KEY_CHECKS = 0;
+
+-- ----------------------------
+-- Table structure for consent_audit
+-- ----------------------------
+DROP TABLE IF EXISTS `consent_audit`;
+CREATE TABLE `consent_audit`  (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `student_id` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `action` enum('granted','revoked','updated') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `ip_address` varchar(45) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
+  `user_agent` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
+  `created_at` timestamp(0) NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`) USING BTREE,
+  INDEX `idx_student_id`(`student_id`) USING BTREE,
+  INDEX `idx_created_at`(`created_at`) USING BTREE,
+  CONSTRAINT `consent_audit_ibfk_1` FOREIGN KEY (`student_id`) REFERENCES `students` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for data_retention
+-- ----------------------------
+DROP TABLE IF EXISTS `data_retention`;
+CREATE TABLE `data_retention`  (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `student_id` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `retention_days` int(11) NULL DEFAULT 90,
+  `scheduled_deletion_date` date NULL DEFAULT NULL,
+  `deleted` tinyint(1) NULL DEFAULT 0,
+  `deleted_at` timestamp(0) NULL DEFAULT NULL,
+  PRIMARY KEY (`id`) USING BTREE,
+  INDEX `student_id`(`student_id`) USING BTREE,
+  INDEX `idx_scheduled_deletion`(`scheduled_deletion_date`) USING BTREE,
+  INDEX `idx_deleted`(`deleted`) USING BTREE,
+  CONSTRAINT `data_retention_ibfk_1` FOREIGN KEY (`student_id`) REFERENCES `students` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for student_store
+-- ----------------------------
+DROP TABLE IF EXISTS `student_store`;
+CREATE TABLE `student_store`  (
+  `id` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `name` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `email` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `phone` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
+  `program` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
+  `year` int(11) NULL DEFAULT NULL,
+  `created_at` timestamp(0) NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp(0) NULL DEFAULT current_timestamp() ON UPDATE CURRENT_TIMESTAMP(0),
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `email`(`email`) USING BTREE,
+  INDEX `idx_email`(`email`) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for students
+-- ----------------------------
+DROP TABLE IF EXISTS `students`;
+CREATE TABLE `students`  (
+  `id` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `name` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `email` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `phone` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
+  `program` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
+  `year` int(11) NULL DEFAULT NULL,
+  `face_descriptor` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `face_descriptor_iv` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `qr_code_data` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `consent_given` tinyint(1) NULL DEFAULT 0,
+  `consent_date` timestamp(0) NULL DEFAULT NULL,
+  `created_at` timestamp(0) NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp(0) NULL DEFAULT current_timestamp() ON UPDATE CURRENT_TIMESTAMP(0),
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `email`(`email`) USING BTREE,
+  UNIQUE INDEX `qr_code_data`(`qr_code_data`) USING BTREE,
+  INDEX `idx_qr_code`(`qr_code_data`) USING BTREE,
+  INDEX `idx_email`(`email`) USING BTREE,
+  INDEX `idx_consent`(`consent_given`) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Records of students
+-- ----------------------------
+INSERT INTO `students` VALUES ('123456', 'senju', '', '', '', NULL, '[-0.08296441286802292,0.13443784415721893,0.06561551243066788,-0.05426422134041786,-0.07628559321165085,-0.02713051065802574,-0.08527059108018875,-0.05560677498579025,0.14356163144111633,-0.06637965887784958,0.2500430941581726,-0.005253704730421305,-0.21984143555164337,-0.07940476387739182,0.015697728842496872,0.15010276436805725,-0.12615607678890228,-0.10862424969673157,-0.12485863268375397,-0.0598876029253006,0.008683226071298122,0.0035535278730094433,0.0693805068731308,0.02892836555838585,-0.10095121711492538,-0.3392736315727234,-0.0643189400434494,-0.016777673736214638,0.06211021915078163,-0.019469089806079865,-0.08891934901475906,0.0195495393127203,-0.22290001809597015,-0.13642819225788116,0.11476591974496841,0.08783230185508728,-0.029129788279533386,0.023600628599524498,0.17692656815052032,0.007076876237988472,-0.18233054876327515,0.10249479115009308,0.06268593668937683,0.2503015995025635,0.16088736057281494,0.1320500522851944,0.02860289439558983,-0.12041625380516052,0.10294578969478607,-0.19463376700878143,0.08160973340272903,0.18974512815475464,0.13268470764160156,0.07452700287103653,0.1194843277335167,-0.1558016687631607,0.010398970916867256,0.12929578125476837,-0.0963694378733635,0.0036658323369920254,0.010714098811149597,0.015527710318565369,0.005661671981215477,-0.12532396614551544,0.2393454760313034,0.08460681885480881,-0.15411227941513062,-0.14583833515644073,0.0811571404337883,-0.047276776283979416,-0.06740425527095795,0.07918792963027954,-0.12769299745559692,-0.12372365593910217,-0.3291841745376587,0.05846947431564331,0.4212413430213928,0.11327613145112991,-0.2400820553302765,0.016041748225688934,-0.052667807787656784,-0.03624294325709343,0.023950986564159393,0.08357729762792587,-0.12962999939918518,0.03713955357670784,-0.023212501779198647,-0.002151208696886897,0.1706703156232834,-0.01544681191444397,-0.04764299839735031,0.1587161272764206,0.013815881684422493,0.1172388419508934,0.013664135709404945,0.0625273734331131,-0.13637901842594147,-0.04033097252249718,-0.18575838208198547,-0.051365382969379425,0.0129836555570364,-0.03803180903196335,0.0048427339643239975,0.11251746863126755,-0.2070177048444748,0.12347104400396347,0.0003309403546154499,-0.020193975418806076,-0.034608595073223114,0.14097408950328827,-0.05855884030461311,-0.045602865517139435,0.057358574122190475,-0.29327061772346497,0.26585352420806885,0.21847380697727203,0.013029382564127445,0.10161864012479782,0.1273135095834732,0.033182136714458466,0.013902714475989342,0.059847526252269745,-0.05262444540858269,-0.15502150356769562,0.056881923228502274,-0.03162693604826927,0.10577791184186935,0.018076764419674873]', '', 'QR-123456-1763755525236', 1, '2025-11-22 04:05:25', '2025-11-22 04:05:25', '2025-11-22 04:05:25');
+
+-- ----------------------------
+-- Table structure for verification_logs
+-- ----------------------------
+DROP TABLE IF EXISTS `verification_logs`;
+CREATE TABLE `verification_logs`  (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `student_id` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `verification_type` enum('qr_scan','face_match','manual') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `success` tinyint(1) NOT NULL,
+  `confidence_score` decimal(5, 4) NULL DEFAULT NULL,
+  `device_info` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
+  `ip_address` varchar(45) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
+  `location_info` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
+  `error_message` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL,
+  `created_at` timestamp(0) NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`) USING BTREE,
+  INDEX `idx_student_id`(`student_id`) USING BTREE,
+  INDEX `idx_created_at`(`created_at`) USING BTREE,
+  INDEX `idx_success`(`success`) USING BTREE,
+  CONSTRAINT `verification_logs_ibfk_1` FOREIGN KEY (`student_id`) REFERENCES `students` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci ROW_FORMAT = Dynamic;
+
+SET FOREIGN_KEY_CHECKS = 1;

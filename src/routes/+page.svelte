@@ -25,51 +25,58 @@
 	let scannedStudent = $state<any>(null);
 	let scanError = $state<string>('');
 	let verificationStartTime = $state<number | null>(null);
+	
+	// USB Scanner state
+	let scannerConnected = $state<boolean>(false);
+	let scannerDevice = $state<any>(null);
+	let scanBuffer = $state<string>('');
+	let lastKeyTime = $state<number>(0);
+	let scanTimeout: any = null;
+	let isProcessingScan = $state<boolean>(false); // Prevent overlapping scans
+	// Note: useKeyboardMode removed - we always need to block keyboard events from scanner
+	
+	// Keyboard buffer for barcode scanner (scanners type very fast)
+	const SCAN_SPEED_THRESHOLD = 100; // milliseconds between keystrokes (scanners are faster than humans)
+	const SCAN_COMPLETE_DELAY = 150; // delay after last character to process scan
+	let scanStartTime = $state<number>(0); // Track when scan started
+	let isScanInProgress = $state<boolean>(false); // Track if we're receiving scanner input
 
 	// Parse barcode format: "Name ID Course"
 	function parseBarcode(input: string): { name: string; id: string; course: string } | null {
-		// Expected format: "jhunes E. Encarguez 123456 Computer Science"
-		// Split by spaces and find the ID (numeric part)
-		const parts = input.trim().split(/\s+/);
+		const trimmed = input.trim();
 		
-		// Find index of ID (should be numeric)
-		let idIndex = -1;
-		for (let i = 0; i < parts.length; i++) {
-			if (/^\d+$/.test(parts[i])) {
-				idIndex = i;
-				break;
-			}
-		}
+		// Find the ID (assume it's a 10-digit student ID)
+		const idMatch = trimmed.match(/(\d{10})/);
+		if (!idMatch) return null;
 		
-		if (idIndex === -1) return null;
+		const id = idMatch[1];
+		const idIndex = trimmed.indexOf(id);
 		
-		const id = parts[idIndex];
-		const name = parts.slice(0, idIndex).join(' ');
-		const course = parts.slice(idIndex + 1).join(' ');
+		const name = trimmed.substring(0, idIndex).trim();
+		const course = trimmed.substring(idIndex + id.length).trim();
+		
+		if (!name || !course) return null;
 		
 		return { name, id, course };
 	}
 
-	async function handleBarcodeInput(event: KeyboardEvent) {
-		// Only process on Enter key
-		if (event.key !== 'Enter') {
+	// Process scanned barcode data
+	async function processBarcodeData(barcodeData: string) {
+		if (!barcodeData.trim() || isProcessingScan) {
 			return;
 		}
 		
-		event.preventDefault();
+		isProcessingScan = true;
 		
-		if (!scannedInput.trim()) {
-			return;
-		}
-		
-		console.log('🔍 Barcode scanned:', scannedInput);
+		console.log('🔍 Barcode scanned:', barcodeData);
 		
 		// Parse the barcode
-		const parsed = parseBarcode(scannedInput);
+		const parsed = parseBarcode(barcodeData);
 		
 		if (!parsed) {
 			scanError = '❌ Invalid barcode format';
 			scannedInput = '';
+			isProcessingScan = false;
 			return;
 		}
 		
@@ -80,8 +87,9 @@
 			const student = await getStudentById(parsed.id);
 			
 			if (!student) {
-				scanError = `❌ Student ID ${parsed.id} not found in database`;
+				scanError = '❌ User not registered';
 				scannedInput = '';
+				isProcessingScan = false;
 				return;
 			}
 			
@@ -96,6 +104,7 @@
 			// Start camera for face verification
 			step = 'verification';
 			verificationStartTime = Date.now();
+			isProcessingScan = false; // Processing complete, allow next scan after verification
 			
 			// Start camera after a short delay
 			setTimeout(() => {
@@ -109,7 +118,267 @@
 			console.error('Error checking student:', err);
 			scanError = '❌ Database error: ' + String(err);
 			scannedInput = '';
+			isProcessingScan = false;
 		}
+	}
+
+	// Global keyboard listener for barcode scanner (HID keyboard mode)
+	// This MUST run even in HID mode to block browser navigation from scanner keyboard events
+	function handleGlobalKeydown(event: KeyboardEvent) {
+		const now = Date.now();
+		const timeSinceLastKey = now - lastKeyTime;
+		
+		// Detect if this is rapid scanner input (even if we're in HID mode)
+		const isRapidInput = timeSinceLastKey < SCAN_SPEED_THRESHOLD;
+		const isPrintableKey = event.key.length === 1;
+		const isScannerKey = event.key === 'Tab' || event.key === 'Enter' || isPrintableKey;
+		
+		// If we detect rapid input or scan in progress, ALWAYS block browser actions
+		if ((isRapidInput && isScannerKey) || isScanInProgress || isProcessingScan) {
+			event.preventDefault();
+			event.stopPropagation();
+			event.stopImmediatePropagation();
+		}
+		
+		// Skip processing if not in scan mode
+		if (step !== 'scan') {
+			return;
+		}
+		
+		// Skip if already processing a complete scan
+		if (isProcessingScan) {
+			return;
+		}
+		
+		// Always block Tab key (scanner sends Tab between fields)
+		if (event.key === 'Tab') {
+			event.preventDefault();
+			event.stopPropagation();
+			event.stopImmediatePropagation();
+			lastKeyTime = now;
+			// Mark as scan in progress if we see rapid Tab
+			if (isRapidInput || scanBuffer.length > 0) {
+				isScanInProgress = true;
+			}
+			return;
+		}
+		
+		// Ignore Shift key presses (just modifiers)
+		if (event.key === 'Shift') {
+			return;
+		}
+		
+		// If Enter key, process the buffer
+		if (event.key === 'Enter') {
+			event.preventDefault();
+			event.stopPropagation();
+			event.stopImmediatePropagation();
+			
+			if (scanTimeout) {
+				clearTimeout(scanTimeout);
+				scanTimeout = null;
+			}
+			
+			if (scanBuffer.length > 0) {
+				console.log('📊 Scanner buffer complete (Enter):', scanBuffer);
+				isScanInProgress = false;
+				processBarcodeData(scanBuffer);
+				scanBuffer = '';
+				scannedInput = '';
+			}
+			lastKeyTime = now;
+			return;
+		}
+		
+		// Only capture printable characters (single character keys)
+		if (isPrintableKey) {
+			// Always prevent default to stop browser search/navigation
+			event.preventDefault();
+			event.stopPropagation();
+			event.stopImmediatePropagation();
+			
+			// Check if this looks like rapid scanner input or start of new scan
+			if (isRapidInput || scanBuffer.length === 0) {
+				// Mark scan as in progress
+				if (scanBuffer.length === 0) {
+					scanStartTime = now;
+					isScanInProgress = true;
+					console.log('🔄 Scan started');
+				}
+				
+				scanBuffer += event.key;
+				scannedInput = scanBuffer; // Update visible input
+				
+				// Clear any existing timeout
+				if (scanTimeout) {
+					clearTimeout(scanTimeout);
+				}
+				
+				// Set timeout to process after scan complete
+				scanTimeout = setTimeout(() => {
+					if (scanBuffer.length > 3 && isScanInProgress) { // Minimum barcode length
+						console.log('📊 Scanner timeout - processing:', scanBuffer);
+						isScanInProgress = false;
+						processBarcodeData(scanBuffer);
+						scanBuffer = '';
+						scannedInput = '';
+					}
+				}, SCAN_COMPLETE_DELAY);
+			} else {
+				// Slow typing - might be manual input, reset buffer
+				scanBuffer = event.key;
+				scanStartTime = now;
+				isScanInProgress = true;
+			}
+			lastKeyTime = now;
+		} else {
+			// For any other special keys during scan, prevent default
+			if (isScanInProgress) {
+				event.preventDefault();
+				event.stopPropagation();
+				event.stopImmediatePropagation();
+			}
+		}
+	}
+	
+	// Connect to USB scanner via WebHID API (optional enhancement)
+	async function connectUSBScanner() {
+		try {
+			// Check if WebHID is supported
+			if (!('hid' in navigator)) {
+				console.log('⚠️ WebHID not supported, using keyboard mode');
+				scanError = '⚠️ WebHID not supported. Scanner will work in keyboard mode.';
+				return;
+			}
+			
+			console.log('🔌 Requesting USB HID device...');
+			
+			// Request access to HID devices (barcode scanners typically have usage page 1)
+			const devices = await (navigator as any).hid.requestDevice({
+				filters: [] // Allow all HID devices, user will select
+			});
+			
+			if (devices.length === 0) {
+				console.log('❌ No device selected');
+				scanError = '❌ No scanner selected';
+				return;
+			}
+			
+			const device = devices[0];
+			console.log('📱 Device selected:', device.productName);
+			
+			// Open the device
+			if (!device.opened) {
+				await device.open();
+			}
+			
+			scannerDevice = device;
+			scannerConnected = true;
+			scanError = '';
+			
+			console.log('✅ Scanner connected:', device.productName);
+			
+			// Listen for input reports
+			let hidBuffer = '';
+			device.addEventListener('inputreport', (event: any) => {
+				const { data } = event;
+				
+				console.log('📊 HID report received, length:', data.byteLength);
+				console.log('📊 HID data bytes:', Array.from(data).map(b => b.toString(16).padStart(2, '0')).join(' '));
+				
+				// Parse HID keyboard data
+				// Most barcode scanners send data as keyboard HID reports
+				// Format: [modifier, reserved, key1, key2, key3, key4, key5, key6]
+				for (let i = 2; i < data.byteLength; i++) {
+					const keyCode = data.getUint8(i);
+					if (keyCode === 0) continue;
+					
+					console.log(`🔤 HID key code: 0x${keyCode.toString(16).padStart(2, '0')} at position ${i}`);
+					
+					// Convert HID key codes to characters
+					const char = hidKeyCodeToChar(keyCode, data.getUint8(0));
+					console.log(`🔤 HID char: "${char}" for key code 0x${keyCode.toString(16).padStart(2, '0')}`);
+					
+					if (char) {
+						if (char === '\n') {
+							// Enter key - process the buffer
+							if (hidBuffer.length > 0) {
+								console.log('📊 HID scan complete:', hidBuffer);
+								processBarcodeData(hidBuffer);
+								hidBuffer = '';
+							}
+						} else {
+							hidBuffer += char;
+							scannedInput = hidBuffer;
+							console.log('📊 HID buffer now:', hidBuffer);
+						}
+					}
+				}
+			});
+			
+		} catch (err) {
+			console.error('Scanner connection error:', err);
+			scanError = '❌ Failed to connect scanner: ' + String(err);
+		}
+	}
+	
+	// Disconnect USB scanner
+	async function disconnectUSBScanner() {
+		if (scannerDevice) {
+			try {
+				await scannerDevice.close();
+				console.log('🔌 Scanner disconnected');
+			} catch (err) {
+				console.error('Error disconnecting scanner:', err);
+			}
+			scannerDevice = null;
+			scannerConnected = false;
+		}
+	}
+	
+	// Convert HID keyboard key codes to characters
+	function hidKeyCodeToChar(keyCode: number, modifier: number): string | null {
+		const shift = (modifier & 0x22) !== 0; // Left or right shift
+		
+		// Key code mapping (USB HID Usage Tables)
+		const keyMap: { [key: number]: [string, string] } = {
+			0x04: ['a', 'A'], 0x05: ['b', 'B'], 0x06: ['c', 'C'], 0x07: ['d', 'D'],
+			0x08: ['e', 'E'], 0x09: ['f', 'F'], 0x0A: ['g', 'G'], 0x0B: ['h', 'H'],
+			0x0C: ['i', 'I'], 0x0D: ['j', 'J'], 0x0E: ['k', 'K'], 0x0F: ['l', 'L'],
+			0x10: ['m', 'M'], 0x11: ['n', 'N'], 0x12: ['o', 'O'], 0x13: ['p', 'P'],
+			0x14: ['q', 'Q'], 0x15: ['r', 'R'], 0x16: ['s', 'S'], 0x17: ['t', 'T'],
+			0x18: ['u', 'U'], 0x19: ['v', 'V'], 0x1A: ['w', 'W'], 0x1B: ['x', 'X'],
+			0x1C: ['y', 'Y'], 0x1D: ['z', 'Z'],
+			0x1E: ['1', '!'], 0x1F: ['2', '@'], 0x20: ['3', '#'], 0x21: ['4', '$'],
+			0x22: ['5', '%'], 0x23: ['6', '^'], 0x24: ['7', '&'], 0x25: ['8', '*'],
+			0x26: ['9', '('], 0x27: ['0', ')'],
+			0x28: ['\n', '\n'], // Enter
+			0x2B: ['\t', '\t'], // Tab
+			0x2C: [' ', ' '],   // Space
+			0x2D: ['-', '_'], 0x2E: ['=', '+'], 0x2F: ['[', '{'], 0x30: [']', '}'],
+			0x33: [';', ':'], 0x34: ["'", '"'], 0x36: [',', '<'], 0x37: ['.', '>'],
+			0x38: ['/', '?'],
+		};
+		
+		const mapping = keyMap[keyCode];
+		if (!mapping) return null;
+		return shift ? mapping[1] : mapping[0];
+	}
+
+	async function handleBarcodeInput(event: KeyboardEvent) {
+		// Only process on Enter key
+		if (event.key !== 'Enter') {
+			return;
+		}
+		
+		event.preventDefault();
+		
+		if (!scannedInput.trim()) {
+			return;
+		}
+		
+		await processBarcodeData(scannedInput);
+		scannedInput = '';
 	}
 
 	// Stop camera and reset when verification is complete
@@ -144,14 +413,24 @@
 			recognitionInterval = null;
 		}
 		
+		// Clear scan timeout
+		if (scanTimeout) {
+			clearTimeout(scanTimeout);
+			scanTimeout = null;
+		}
+		
 		// Reset state
 		studentStore.reset();
 		scannedStudent = null;
 		scannedInput = '';
+		scanBuffer = '';
 		scanError = '';
 		step = 'scan';
 		verificationStartTime = null;
 		showConsent = false;
+		isProcessingScan = false; // Allow new scans
+		isScanInProgress = false; // Reset scan progress flag
+		lastKeyTime = 0; // Reset key timing
 	}
 
 	onMount(async () => {
@@ -166,10 +445,33 @@
 
 			modelsLoading = false;
 			
+			// Add global keyboard listener for barcode scanner with capture phase
+			// Using capture: true ensures we get the event before the browser
+			window.addEventListener('keydown', handleGlobalKeydown, { capture: true });
+			console.log('🔌 Global keyboard listener added for barcode scanner');
+			
 			// Focus on input for barcode scanner
 			setTimeout(() => {
 				document.getElementById('barcode-input')?.focus();
 			}, 500);
+			
+			// Try to reconnect to previously paired HID devices
+			if ('hid' in navigator) {
+				try {
+					const devices = await (navigator as any).hid.getDevices();
+					if (devices.length > 0) {
+						const device = devices[0];
+						if (!device.opened) {
+							await device.open();
+						}
+						scannerDevice = device;
+						scannerConnected = true;
+						console.log('✅ Auto-reconnected to scanner:', device.productName);
+					}
+				} catch (err) {
+					console.log('⚠️ Could not auto-reconnect to HID devices:', err);
+				}
+			}
 		} catch (err) {
 			console.error('Failed to initialize:', err);
 			studentStore.errorMessage = 'Failed to initialize system. Please refresh.';
@@ -179,6 +481,20 @@
 	onDestroy(() => {
 		if (recognitionInterval) {
 			clearInterval(recognitionInterval);
+		}
+		
+		// Only run browser-specific cleanup on client side
+		if (typeof window !== 'undefined') {
+			// Remove global keyboard listener (must match capture: true)
+			window.removeEventListener('keydown', handleGlobalKeydown, { capture: true });
+			
+			// Clear scan timeout
+			if (scanTimeout) {
+				clearTimeout(scanTimeout);
+			}
+			
+			// Disconnect USB scanner
+			disconnectUSBScanner();
 		}
 		
 		// Stop camera on unmount
@@ -235,8 +551,10 @@
 					<p class="stat-value">{step.toUpperCase()}</p>
 				</div>
 				<div class="stat-card">
-					<h3 class="stat-label">CAMERA</h3>
-					<p class="stat-value">{cameraStore.isActive ? 'ACTIVE' : 'INACTIVE'}</p>
+					<h3 class="stat-label">SCANNER</h3>
+					<p class="stat-value" style="color: {scannerConnected ? '#34c759' : '#007aff'}">
+						{scannerConnected ? 'USB CONNECTED' : 'KEYBOARD MODE'}
+					</p>
 				</div>
 			</section>
 
@@ -257,7 +575,26 @@
 							</div>
 							
 							<h3 class="scanner-instruction">SCAN OR SWIPE STUDENT ID CARD</h3>
-							<p class="scanner-detail">Use the barcode/QR scanner to scan the student ID</p>
+							<p class="scanner-detail">
+								{#if scannerConnected}
+									✅ USB Scanner connected - Just scan your ID!
+								{:else}
+									Scanner in keyboard mode - Scan will auto-detect
+								{/if}
+							</p>
+							
+							<!-- Scanner connection button -->
+							<div class="scanner-controls">
+								{#if !scannerConnected}
+									<button class="btn-scanner" onclick={connectUSBScanner}>
+										🔌 CONNECT USB SCANNER
+									</button>
+								{:else}
+									<button class="btn-scanner btn-disconnect" onclick={disconnectUSBScanner}>
+										⏏️ DISCONNECT SCANNER
+									</button>
+								{/if}
+							</div>
 							
 							<input
 								id="barcode-input"
@@ -595,6 +932,40 @@
 		color: #888888;
 		margin: 0;
 		text-align: center;
+	}
+
+	.scanner-controls {
+		display: flex;
+		gap: 12px;
+		margin: 8px 0;
+	}
+
+	.btn-scanner {
+		padding: 12px 24px;
+		background: #007aff;
+		color: #ffffff;
+		border: 2px solid #383838;
+		font-family: 'JetBrains Mono', monospace;
+		font-size: 12px;
+		font-weight: bold;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.btn-scanner:hover {
+		background: #0051d5;
+		transform: translateY(-2px);
+		box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+	}
+
+	.btn-scanner.btn-disconnect {
+		background: #ff9500;
+	}
+
+	.btn-scanner.btn-disconnect:hover {
+		background: #cc7700;
 	}
 
 	.barcode-input {
