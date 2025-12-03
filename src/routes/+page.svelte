@@ -82,6 +82,35 @@
 		}
 	}
 
+	// Turnstile control functions
+	async function unlockTurnstile(studentId: string, studentName: string) {
+		try {
+			const res = await fetch('/api/turnstile/control', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ action: 'unlock', studentId, studentName })
+			});
+			const data = await res.json();
+			console.log('🔓 Turnstile unlock sent:', data);
+		} catch (err) {
+			console.error('❌ Turnstile control error:', err);
+		}
+	}
+
+	async function lockTurnstile() {
+		try {
+			const res = await fetch('/api/turnstile/control', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ action: 'lock' })
+			});
+			const data = await res.json();
+			console.log('🔒 Turnstile lock sent:', data);
+		} catch (err) {
+			console.error('❌ Turnstile control error:', err);
+		}
+	}
+
 	// Parse barcode format: "Name ID Course"
 	function parseBarcode(input: string): { name: string; id: string; course: string } | null {
 		const trimmed = input.trim();
@@ -340,6 +369,11 @@
 		recognitionActive = false;
 		step = 'result';
 		
+		// 🚀 TRIGGER TURNSTILE - unlock on success
+		if (success && scannedStudent) {
+			unlockTurnstile(scannedStudent.id, scannedStudent.name);
+		}
+		
 		// Auto-reset after 1.5 seconds for fast transaction
 		setTimeout(() => {
 			resetVerification();
@@ -348,6 +382,9 @@
 
 	function resetVerification() {
 		console.log('🔄 Resetting verification...');
+		
+		// 🚀 LOCK TURNSTILE on reset
+		lockTurnstile();
 		
 		// Stop recognition
 		recognitionActive = false;
@@ -470,8 +507,10 @@
 					<p class="stat-value">{studentStore.verificationStatus.toUpperCase()}</p>
 				</div>
 				<div class="stat-card">
-					<h3 class="stat-label">CONFIDENCE</h3>
-					<p class="stat-value">{(studentStore.confidenceScore * 100).toFixed(1)}%</p>
+					<h3 class="stat-label">CAMERA</h3>
+					<p class="stat-value" style="color: {cameraReady ? '#34c759' : '#ff3b30'}">
+						{cameraReady ? 'READY' : 'LOADING'}
+					</p>
 				</div>
 				<div class="stat-card">
 					<h3 class="stat-label">STEP</h3>
@@ -487,32 +526,16 @@
 
 			<!-- Verification Section -->
 			<section class="verification-section">
-				<!-- Always show camera preview -->
-				<div class="camera-preview-container">
-					<div class="video-wrapper">
-						<video 
-							bind:this={videoElement} 
-							autoplay 
-							playsinline 
-							muted
-							class="video-element"
-						>
-							<track kind="captions" src="" srclang="en" label="No captions" default />
-						</video>
-						{#if cameraReady}
-							<div class="camera-status {recognitionActive ? 'active' : 'standby'}">
-								<span class="status-dot"></span>
-								<span class="status-text">
-									{recognitionActive ? 'VERIFYING' : 'READY'}
-								</span>
-							</div>
-						{:else}
-							<div class="camera-loading">
-								<p>📷 Initializing camera...</p>
-							</div>
-						{/if}
-					</div>
-				</div>
+				<!-- Hidden video element for internal face detection processing -->
+				<video 
+					bind:this={videoElement} 
+					autoplay 
+					playsinline 
+					muted
+					class="hidden-video"
+				>
+					<track kind="captions" src="" srclang="en" label="No captions" default />
+				</video>
 
 				{#if step === 'scan'}
 					<div class="step-container">
@@ -796,72 +819,14 @@
 		padding: 32px;
 	}
 
-	/* Camera Preview - Always visible */
-	.camera-preview-container {
-		margin-bottom: 24px;
-	}
-
-	.video-wrapper {
-		position: relative;
-		width: 100%;
-		max-width: 640px;
-		margin: 0 auto;
-		border: 2px solid #383838;
-		background: #000;
-	}
-
-	.video-element {
-		width: 100%;
-		height: auto;
-		min-height: 360px;
-		display: block;
-		object-fit: cover;
-	}
-
-	.camera-status {
+	/* Hidden video for internal face detection processing */
+	.hidden-video {
 		position: absolute;
-		top: 12px;
-		right: 12px;
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding: 8px 16px;
-		border: 2px solid #383838;
-		font-family: 'JetBrains Mono', monospace;
-		font-size: 12px;
-		font-weight: bold;
-		text-transform: uppercase;
-	}
-
-	.camera-status.standby {
-		background: rgba(0, 122, 255, 0.9);
-		color: #ffffff;
-	}
-
-	.camera-status.active {
-		background: rgba(52, 199, 89, 0.9);
-		color: #ffffff;
-	}
-
-	.camera-status .status-dot {
-		width: 8px;
-		height: 8px;
-		border-radius: 50%;
-		background: #ffffff;
-	}
-
-	.camera-status.active .status-dot {
-		animation: pulse 1s ease-in-out infinite;
-	}
-
-	.camera-loading {
-		position: absolute;
-		top: 50%;
-		left: 50%;
-		transform: translate(-50%, -50%);
-		color: #ffffff;
-		font-family: 'JetBrains Mono', monospace;
-		font-size: 14px;
+		left: -9999px;
+		width: 640px;
+		height: 480px;
+		opacity: 0;
+		pointer-events: none;
 	}
 
 	.step-container {
@@ -881,26 +846,7 @@
 		text-align: center;
 	}
 
-	.btn-action {
-		padding: 16px 32px;
-		background: #34c759;
-		color: #ffffff;
-		border: 2px solid #383838;
-		font-family: 'JetBrains Mono', monospace;
-		font-size: 14px;
-		font-weight: bold;
-		text-transform: uppercase;
-		letter-spacing: 0.5px;
-		cursor: pointer;
-		transition: all 0.15s ease;
-	}
-
-	.btn-action:hover {
-		background: #28a745;
-		transform: translateY(-2px);
-		box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
-	}
-
+	/* Result Container */
 	.result-container {
 		text-align: center;
 		padding: 32px;
@@ -927,12 +873,6 @@
 		font-weight: bold;
 		margin: 0 0 16px 0;
 		color: #383838;
-	}
-	
-	.result-detail {
-		font-size: 14px;
-		color: #888888;
-		margin: 0 0 16px 0;
 	}
 
 	/* Scanner Styles */
