@@ -123,7 +123,7 @@ src/routes/api/face/
 **Data Structure for Descriptors**:
 ```json
 {
-  "studentId": "STU-12345",
+  "studentId": "2013102064",
   "firstName": "John",
   "lastName": "Doe",
   "descriptors": [
@@ -190,7 +190,7 @@ src/routes/api/face/
 3. Admin captures face
 4. System sends to /api/face/recognize
 5. Results display:
-   - ✅ Matched: "Welcome, John Doe (STU-12345)"
+   - ✅ Matched: "Welcome, John Doe (2013102064)"
    - ❌ No Match: "Face not recognized"
    - Distance score shown for debugging
 ```

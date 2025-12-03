@@ -128,6 +128,7 @@ async function loadStudents() {
 		
 		const TARGET_WIDTH = 640;
 		const TARGET_HEIGHT = 480;
+		const TARGET_ASPECT = TARGET_WIDTH / TARGET_HEIGHT;
 		
 		canvasElement.width = TARGET_WIDTH;
 		canvasElement.height = TARGET_HEIGHT;
@@ -135,7 +136,50 @@ async function loadStudents() {
 		const ctx = canvasElement.getContext('2d');
 		if (!ctx) return '';
 		
-		ctx.drawImage(videoElement, 0, 0, TARGET_WIDTH, TARGET_HEIGHT);
+		// Get video dimensions
+		const videoWidth = videoElement.videoWidth || 640;
+		const videoHeight = videoElement.videoHeight || 480;
+		const videoAspect = videoWidth / videoHeight;
+		
+		// Calculate center crop dimensions
+		let cropWidth: number;
+		let cropHeight: number;
+		let cropX: number;
+		let cropY: number;
+		
+		if (videoAspect > TARGET_ASPECT) {
+			// Video is wider - crop sides
+			cropHeight = videoHeight;
+			cropWidth = videoHeight * TARGET_ASPECT;
+			cropX = (videoWidth - cropWidth) / 2;
+			cropY = 0;
+		} else {
+			// Video is taller - crop top/bottom
+			cropWidth = videoWidth;
+			cropHeight = videoWidth / TARGET_ASPECT;
+			cropX = 0;
+			cropY = (videoHeight - cropHeight) / 2;
+		}
+		
+		// Draw center-cropped and scaled image
+		ctx.drawImage(
+			videoElement,
+			cropX, cropY, cropWidth, cropHeight,
+			0, 0, TARGET_WIDTH, TARGET_HEIGHT
+		);
+		
+		// Apply grayscale for consistent face detection
+		const imageData = ctx.getImageData(0, 0, TARGET_WIDTH, TARGET_HEIGHT);
+		const data = imageData.data;
+		for (let i = 0; i < data.length; i += 4) {
+			const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+			data[i] = gray;     // R
+			data[i + 1] = gray; // G
+			data[i + 2] = gray; // B
+			// Alpha stays the same
+		}
+		ctx.putImageData(imageData, 0, 0);
+		
 		return canvasElement.toDataURL('image/jpeg', 0.92);
 	}
 
@@ -366,13 +410,59 @@ function resetForm() {
 			return '';
 		}
 		
-		testCanvasElement.width = testVideoElement.videoWidth;
-		testCanvasElement.height = testVideoElement.videoHeight;
+		const TARGET_WIDTH = 640;
+		const TARGET_HEIGHT = 480;
+		const TARGET_ASPECT = TARGET_WIDTH / TARGET_HEIGHT;
+		
+		testCanvasElement.width = TARGET_WIDTH;
+		testCanvasElement.height = TARGET_HEIGHT;
 		
 		const ctx = testCanvasElement.getContext('2d');
 		if (!ctx) return '';
 		
-		ctx.drawImage(testVideoElement, 0, 0);
+		// Get video dimensions
+		const videoWidth = testVideoElement.videoWidth;
+		const videoHeight = testVideoElement.videoHeight;
+		const videoAspect = videoWidth / videoHeight;
+		
+		// Calculate center crop dimensions
+		let cropWidth: number;
+		let cropHeight: number;
+		let cropX: number;
+		let cropY: number;
+		
+		if (videoAspect > TARGET_ASPECT) {
+			// Video is wider - crop sides
+			cropHeight = videoHeight;
+			cropWidth = videoHeight * TARGET_ASPECT;
+			cropX = (videoWidth - cropWidth) / 2;
+			cropY = 0;
+		} else {
+			// Video is taller - crop top/bottom
+			cropWidth = videoWidth;
+			cropHeight = videoWidth / TARGET_ASPECT;
+			cropX = 0;
+			cropY = (videoHeight - cropHeight) / 2;
+		}
+		
+		// Draw center-cropped and scaled image
+		ctx.drawImage(
+			testVideoElement,
+			cropX, cropY, cropWidth, cropHeight,
+			0, 0, TARGET_WIDTH, TARGET_HEIGHT
+		);
+		
+		// Apply grayscale for consistent face detection
+		const imageData = ctx.getImageData(0, 0, TARGET_WIDTH, TARGET_HEIGHT);
+		const data = imageData.data;
+		for (let i = 0; i < data.length; i += 4) {
+			const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+			data[i] = gray;     // R
+			data[i + 1] = gray; // G
+			data[i + 2] = gray; // B
+		}
+		ctx.putImageData(imageData, 0, 0);
+		
 		return testCanvasElement.toDataURL('image/jpeg', 0.8);
 	}
 
@@ -413,10 +503,10 @@ function resetForm() {
 	// Development helper: Fill form with test data
 	function fillTestData() {
 		const timestamp = Date.now();
-		const randomNum = Math.floor(Math.random() * 1000);
+		const randomNum = Math.floor(Math.random() * 9000000000) + 1000000000; // 10-digit number
 		
 		formData = {
-			id: `STU-${randomNum}`,
+			id: randomNum.toString(),
 			name: `Test Student ${randomNum}`,
 			email: `student${randomNum}@test.edu`,
 			phone: `+1234567${String(randomNum).padStart(4, '0')}`,
@@ -531,7 +621,7 @@ function resetForm() {
 								type="text"
 								class="form-input"
 								bind:value={formData.id}
-								placeholder="STU-12345"
+								placeholder="2013102064"
 								required
 							/>
 						</div>

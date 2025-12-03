@@ -266,10 +266,10 @@
 	// Development helper: Fill form with test data
 	function fillTestData() {
 		const timestamp = Date.now();
-		const randomNum = Math.floor(Math.random() * 1000);
+		const randomNum = Math.floor(Math.random() * 9000000000) + 1000000000; // 10-digit number
 		
 		formData = {
-			id: `STU-${randomNum}`,
+			id: randomNum.toString(),
 			name: `Test Student ${randomNum}`,
 			email: `student${randomNum}@test.edu`,
 			phone: `+1234567${String(randomNum).padStart(4, '0')}`,
@@ -384,7 +384,7 @@
 								type="text"
 								class="form-input"
 								bind:value={formData.id}
-								placeholder="STU-12345"
+								placeholder="2013102064"
 								required
 							/>
 						</div>

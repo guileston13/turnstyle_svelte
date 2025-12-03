@@ -1,24 +1,22 @@
 <!-- Main Verification Page -->
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import Camera from '$lib/components/Camera.svelte';
-	import FaceRecognition from '$lib/components/FaceRecognition.svelte';
 	import FaceMatch from '$lib/components/FaceMatch.svelte';
 	import ConsentDialog from '$lib/components/ConsentDialog.svelte';
 	import { studentStore } from '$lib/stores/student.svelte';
-	import { cameraStore } from '$lib/stores/camera.svelte';
 	import { loadModels, getModelsLoaded, getLoadProgress } from '$lib/services/face';
 	import { initDB, getStudentById } from '$lib/services/db';
 
-	let cameraRef = $state<any>();
-	let faceRecognitionRef = $state<any>();
 	let faceMatchRef = $state<any>();
+	let videoElement = $state<HTMLVideoElement>();
+	let cameraStream = $state<MediaStream | null>(null);
+	let cameraReady = $state<boolean>(false);
 
 	let modelsLoading = $state<boolean>(true);
 	let modelProgress = $state<number>(0);
 	let showConsent = $state<boolean>(false);
 	let step = $state<'scan' | 'verification' | 'result'>('scan');
-	let recognitionInterval: any = null;
+	let recognitionActive = $state<boolean>(false);
 	
 	// Scanner state
 	let scannedInput = $state<string>('');
@@ -32,45 +30,80 @@
 	let scanBuffer = $state<string>('');
 	let lastKeyTime = $state<number>(0);
 	let scanTimeout: any = null;
-	let isProcessingScan = $state<boolean>(false); // Prevent overlapping scans
-	// Note: useKeyboardMode removed - we always need to block keyboard events from scanner
+	let isProcessingScan = $state<boolean>(false);
 	
-	// Keyboard buffer for barcode scanner (scanners type very fast)
-	const SCAN_SPEED_THRESHOLD = 100; // milliseconds between keystrokes (scanners are faster than humans)
-	const SCAN_COMPLETE_DELAY = 150; // delay after last character to process scan
-	let scanStartTime = $state<number>(0); // Track when scan started
-	let isScanInProgress = $state<boolean>(false); // Track if we're receiving scanner input
+	// Keyboard buffer for barcode scanner
+	const SCAN_SPEED_THRESHOLD = 100;
+	const SCAN_COMPLETE_DELAY = 150;
+	let scanStartTime = $state<number>(0);
+	let isScanInProgress = $state<boolean>(false);
+
+	// Start camera immediately on mount for preview (always on)
+	async function startCameraPreview() {
+		try {
+			console.log('🎥 Starting camera preview...');
+			const stream = await navigator.mediaDevices.getUserMedia({
+				video: {
+					facingMode: 'user',
+					width: { ideal: 640 },
+					height: { ideal: 480 }
+				}
+			});
+			
+			cameraStream = stream;
+			
+			// Wait for video element to be ready
+			await new Promise<void>((resolve) => {
+				const checkVideo = () => {
+					if (videoElement) {
+						videoElement.srcObject = stream;
+						videoElement.play().then(() => {
+							cameraReady = true;
+							console.log('🎥 Camera preview active');
+							resolve();
+						});
+					} else {
+						setTimeout(checkVideo, 50);
+					}
+				};
+				checkVideo();
+			});
+		} catch (err) {
+			console.error('🎥 Camera error:', err);
+			scanError = '❌ Camera access denied. Please allow camera access.';
+		}
+	}
+
+	function stopCameraPreview() {
+		if (cameraStream) {
+			cameraStream.getTracks().forEach(track => track.stop());
+			cameraStream = null;
+			cameraReady = false;
+		}
+	}
 
 	// Parse barcode format: "Name ID Course"
 	function parseBarcode(input: string): { name: string; id: string; course: string } | null {
 		const trimmed = input.trim();
-		
-		// Find the ID (assume it's a 10-digit student ID)
 		const idMatch = trimmed.match(/(\d{10})/);
 		if (!idMatch) return null;
 		
 		const id = idMatch[1];
 		const idIndex = trimmed.indexOf(id);
-		
 		const name = trimmed.substring(0, idIndex).trim();
 		const course = trimmed.substring(idIndex + id.length).trim();
 		
 		if (!name || !course) return null;
-		
 		return { name, id, course };
 	}
 
 	// Process scanned barcode data
 	async function processBarcodeData(barcodeData: string) {
-		if (!barcodeData.trim() || isProcessingScan) {
-			return;
-		}
+		if (!barcodeData.trim() || isProcessingScan) return;
 		
 		isProcessingScan = true;
-		
 		console.log('🔍 Barcode scanned:', barcodeData);
 		
-		// Parse the barcode
 		const parsed = parseBarcode(barcodeData);
 		
 		if (!parsed) {
@@ -82,7 +115,6 @@
 		
 		console.log('📋 Parsed data:', parsed);
 		
-		// Check if student exists in database
 		try {
 			const student = await getStudentById(parsed.id);
 			
@@ -95,24 +127,16 @@
 			
 			console.log('✅ Valid student found:', student);
 			
-			// Set student and start camera
 			scannedStudent = student;
 			studentStore.currentStudent = student;
 			scanError = '';
 			scannedInput = '';
 			
-			// Start camera for face verification
+			// Enable face recognition (camera is already running)
 			step = 'verification';
+			recognitionActive = true;
 			verificationStartTime = Date.now();
-			isProcessingScan = false; // Processing complete, allow next scan after verification
-			
-			// Start camera after a short delay
-			setTimeout(() => {
-				if (cameraRef && cameraRef.startCamera) {
-					console.log('📱 Starting camera for face verification...');
-					cameraRef.startCamera();
-				}
-			}, 500);
+			isProcessingScan = false;
 			
 		} catch (err) {
 			console.error('Error checking student:', err);
@@ -122,53 +146,37 @@
 		}
 	}
 
-	// Global keyboard listener for barcode scanner (HID keyboard mode)
-	// This MUST run even in HID mode to block browser navigation from scanner keyboard events
+	// Global keyboard listener for barcode scanner
 	function handleGlobalKeydown(event: KeyboardEvent) {
 		const now = Date.now();
 		const timeSinceLastKey = now - lastKeyTime;
 		
-		// Detect if this is rapid scanner input (even if we're in HID mode)
 		const isRapidInput = timeSinceLastKey < SCAN_SPEED_THRESHOLD;
 		const isPrintableKey = event.key.length === 1;
 		const isScannerKey = event.key === 'Tab' || event.key === 'Enter' || isPrintableKey;
 		
-		// If we detect rapid input or scan in progress, ALWAYS block browser actions
 		if ((isRapidInput && isScannerKey) || isScanInProgress || isProcessingScan) {
 			event.preventDefault();
 			event.stopPropagation();
 			event.stopImmediatePropagation();
 		}
 		
-		// Skip processing if not in scan mode
-		if (step !== 'scan') {
-			return;
-		}
+		if (step !== 'scan') return;
+		if (isProcessingScan) return;
 		
-		// Skip if already processing a complete scan
-		if (isProcessingScan) {
-			return;
-		}
-		
-		// Always block Tab key (scanner sends Tab between fields)
 		if (event.key === 'Tab') {
 			event.preventDefault();
 			event.stopPropagation();
 			event.stopImmediatePropagation();
 			lastKeyTime = now;
-			// Mark as scan in progress if we see rapid Tab
 			if (isRapidInput || scanBuffer.length > 0) {
 				isScanInProgress = true;
 			}
 			return;
 		}
 		
-		// Ignore Shift key presses (just modifiers)
-		if (event.key === 'Shift') {
-			return;
-		}
+		if (event.key === 'Shift') return;
 		
-		// If Enter key, process the buffer
 		if (event.key === 'Enter') {
 			event.preventDefault();
 			event.stopPropagation();
@@ -190,16 +198,12 @@
 			return;
 		}
 		
-		// Only capture printable characters (single character keys)
 		if (isPrintableKey) {
-			// Always prevent default to stop browser search/navigation
 			event.preventDefault();
 			event.stopPropagation();
 			event.stopImmediatePropagation();
 			
-			// Check if this looks like rapid scanner input or start of new scan
 			if (isRapidInput || scanBuffer.length === 0) {
-				// Mark scan as in progress
 				if (scanBuffer.length === 0) {
 					scanStartTime = now;
 					isScanInProgress = true;
@@ -207,16 +211,12 @@
 				}
 				
 				scanBuffer += event.key;
-				scannedInput = scanBuffer; // Update visible input
+				scannedInput = scanBuffer;
 				
-				// Clear any existing timeout
-				if (scanTimeout) {
-					clearTimeout(scanTimeout);
-				}
+				if (scanTimeout) clearTimeout(scanTimeout);
 				
-				// Set timeout to process after scan complete
 				scanTimeout = setTimeout(() => {
-					if (scanBuffer.length > 3 && isScanInProgress) { // Minimum barcode length
+					if (scanBuffer.length > 3 && isScanInProgress) {
 						console.log('📊 Scanner timeout - processing:', scanBuffer);
 						isScanInProgress = false;
 						processBarcodeData(scanBuffer);
@@ -225,14 +225,12 @@
 					}
 				}, SCAN_COMPLETE_DELAY);
 			} else {
-				// Slow typing - might be manual input, reset buffer
 				scanBuffer = event.key;
 				scanStartTime = now;
 				isScanInProgress = true;
 			}
 			lastKeyTime = now;
 		} else {
-			// For any other special keys during scan, prevent default
 			if (isScanInProgress) {
 				event.preventDefault();
 				event.stopPropagation();
@@ -241,93 +239,60 @@
 		}
 	}
 	
-	// Connect to USB scanner via WebHID API (optional enhancement)
+	// USB Scanner functions
 	async function connectUSBScanner() {
 		try {
-			// Check if WebHID is supported
 			if (!('hid' in navigator)) {
 				console.log('⚠️ WebHID not supported, using keyboard mode');
 				scanError = '⚠️ WebHID not supported. Scanner will work in keyboard mode.';
 				return;
 			}
 			
-			console.log('🔌 Requesting USB HID device...');
-			
-			// Request access to HID devices (barcode scanners typically have usage page 1)
-			const devices = await (navigator as any).hid.requestDevice({
-				filters: [] // Allow all HID devices, user will select
-			});
+			const devices = await (navigator as any).hid.requestDevice({ filters: [] });
 			
 			if (devices.length === 0) {
-				console.log('❌ No device selected');
 				scanError = '❌ No scanner selected';
 				return;
 			}
 			
 			const device = devices[0];
-			console.log('📱 Device selected:', device.productName);
-			
-			// Open the device
-			if (!device.opened) {
-				await device.open();
-			}
+			if (!device.opened) await device.open();
 			
 			scannerDevice = device;
 			scannerConnected = true;
 			scanError = '';
-			
 			console.log('✅ Scanner connected:', device.productName);
 			
-			// Listen for input reports
 			let hidBuffer = '';
 			device.addEventListener('inputreport', (event: any) => {
 				const { data } = event;
-				
-				console.log('📊 HID report received, length:', data.byteLength);
-				console.log('📊 HID data bytes:', Array.from(data).map(b => b.toString(16).padStart(2, '0')).join(' '));
-				
-				// Parse HID keyboard data
-				// Most barcode scanners send data as keyboard HID reports
-				// Format: [modifier, reserved, key1, key2, key3, key4, key5, key6]
 				for (let i = 2; i < data.byteLength; i++) {
 					const keyCode = data.getUint8(i);
 					if (keyCode === 0) continue;
-					
-					console.log(`🔤 HID key code: 0x${keyCode.toString(16).padStart(2, '0')} at position ${i}`);
-					
-					// Convert HID key codes to characters
 					const char = hidKeyCodeToChar(keyCode, data.getUint8(0));
-					console.log(`🔤 HID char: "${char}" for key code 0x${keyCode.toString(16).padStart(2, '0')}`);
-					
 					if (char) {
 						if (char === '\n') {
-							// Enter key - process the buffer
 							if (hidBuffer.length > 0) {
-								console.log('📊 HID scan complete:', hidBuffer);
 								processBarcodeData(hidBuffer);
 								hidBuffer = '';
 							}
 						} else {
 							hidBuffer += char;
 							scannedInput = hidBuffer;
-							console.log('📊 HID buffer now:', hidBuffer);
 						}
 					}
 				}
 			});
-			
 		} catch (err) {
 			console.error('Scanner connection error:', err);
 			scanError = '❌ Failed to connect scanner: ' + String(err);
 		}
 	}
 	
-	// Disconnect USB scanner
 	async function disconnectUSBScanner() {
 		if (scannerDevice) {
 			try {
 				await scannerDevice.close();
-				console.log('🔌 Scanner disconnected');
 			} catch (err) {
 				console.error('Error disconnecting scanner:', err);
 			}
@@ -336,11 +301,8 @@
 		}
 	}
 	
-	// Convert HID keyboard key codes to characters
 	function hidKeyCodeToChar(keyCode: number, modifier: number): string | null {
-		const shift = (modifier & 0x22) !== 0; // Left or right shift
-		
-		// Key code mapping (USB HID Usage Tables)
+		const shift = (modifier & 0x22) !== 0;
 		const keyMap: { [key: number]: [string, string] } = {
 			0x04: ['a', 'A'], 0x05: ['b', 'B'], 0x06: ['c', 'C'], 0x07: ['d', 'D'],
 			0x08: ['e', 'E'], 0x09: ['f', 'F'], 0x0A: ['g', 'G'], 0x0B: ['h', 'H'],
@@ -352,74 +314,50 @@
 			0x1E: ['1', '!'], 0x1F: ['2', '@'], 0x20: ['3', '#'], 0x21: ['4', '$'],
 			0x22: ['5', '%'], 0x23: ['6', '^'], 0x24: ['7', '&'], 0x25: ['8', '*'],
 			0x26: ['9', '('], 0x27: ['0', ')'],
-			0x28: ['\n', '\n'], // Enter
-			0x2B: ['\t', '\t'], // Tab
-			0x2C: [' ', ' '],   // Space
+			0x28: ['\n', '\n'], 0x2B: ['\t', '\t'], 0x2C: [' ', ' '],
 			0x2D: ['-', '_'], 0x2E: ['=', '+'], 0x2F: ['[', '{'], 0x30: [']', '}'],
 			0x33: [';', ':'], 0x34: ["'", '"'], 0x36: [',', '<'], 0x37: ['.', '>'],
 			0x38: ['/', '?'],
 		};
-		
 		const mapping = keyMap[keyCode];
 		if (!mapping) return null;
 		return shift ? mapping[1] : mapping[0];
 	}
 
 	async function handleBarcodeInput(event: KeyboardEvent) {
-		// Only process on Enter key
-		if (event.key !== 'Enter') {
-			return;
-		}
-		
+		if (event.key !== 'Enter') return;
 		event.preventDefault();
-		
-		if (!scannedInput.trim()) {
-			return;
-		}
-		
+		if (!scannedInput.trim()) return;
 		await processBarcodeData(scannedInput);
 		scannedInput = '';
 	}
 
-	// Stop camera and reset when verification is complete
+	// Stop recognition and reset when verification is complete
 	function handleVerificationComplete(success: boolean) {
 		console.log('🎯 Verification complete:', success ? 'SUCCESS' : 'FAILED');
 		
-		// Stop camera
-		if (cameraRef && cameraRef.stopCamera) {
-			cameraRef.stopCamera();
-		}
-		
-		// Show result
+		// Stop face recognition but keep camera running for next person
+		recognitionActive = false;
 		step = 'result';
 		
-		// Auto-reset after 5 seconds
+		// Auto-reset after 1.5 seconds for fast transaction
 		setTimeout(() => {
 			resetVerification();
-		}, 5000);
+		}, 1500);
 	}
 
 	function resetVerification() {
 		console.log('🔄 Resetting verification...');
 		
-		// Stop camera if active
-		if (cameraRef && cameraRef.stopCamera) {
-			cameraRef.stopCamera();
-		}
+		// Stop recognition
+		recognitionActive = false;
 		
-		// Clear intervals
-		if (recognitionInterval) {
-			clearInterval(recognitionInterval);
-			recognitionInterval = null;
-		}
-		
-		// Clear scan timeout
 		if (scanTimeout) {
 			clearTimeout(scanTimeout);
 			scanTimeout = null;
 		}
 		
-		// Reset state
+		// Reset state but keep camera running
 		studentStore.reset();
 		scannedStudent = null;
 		scannedInput = '';
@@ -428,42 +366,47 @@
 		step = 'scan';
 		verificationStartTime = null;
 		showConsent = false;
-		isProcessingScan = false; // Allow new scans
-		isScanInProgress = false; // Reset scan progress flag
-		lastKeyTime = 0; // Reset key timing
+		isProcessingScan = false;
+		isScanInProgress = false;
+		lastKeyTime = 0;
+		
+		// Refocus the input
+		setTimeout(() => {
+			document.getElementById('barcode-input')?.focus();
+		}, 100);
+	}
+
+	function getVideoElement(): HTMLVideoElement | undefined {
+		return videoElement;
 	}
 
 	onMount(async () => {
 		try {
-			// Initialize database
 			await initDB();
-
-			// Load face detection models
+			
+			// Load face models first
 			await loadModels((progress) => {
 				modelProgress = progress;
 			});
-
 			modelsLoading = false;
 			
-			// Add global keyboard listener for barcode scanner with capture phase
-			// Using capture: true ensures we get the event before the browser
-			window.addEventListener('keydown', handleGlobalKeydown, { capture: true });
-			console.log('🔌 Global keyboard listener added for barcode scanner');
+			// Start camera preview immediately after models load
+			await startCameraPreview();
 			
-			// Focus on input for barcode scanner
+			window.addEventListener('keydown', handleGlobalKeydown, { capture: true });
+			console.log('🔌 Global keyboard listener added');
+			
 			setTimeout(() => {
 				document.getElementById('barcode-input')?.focus();
 			}, 500);
 			
-			// Try to reconnect to previously paired HID devices
+			// Auto-reconnect HID devices
 			if ('hid' in navigator) {
 				try {
 					const devices = await (navigator as any).hid.getDevices();
 					if (devices.length > 0) {
 						const device = devices[0];
-						if (!device.opened) {
-							await device.open();
-						}
+						if (!device.opened) await device.open();
 						scannerDevice = device;
 						scannerConnected = true;
 						console.log('✅ Auto-reconnected to scanner:', device.productName);
@@ -479,28 +422,12 @@
 	});
 
 	onDestroy(() => {
-		if (recognitionInterval) {
-			clearInterval(recognitionInterval);
-		}
-		
-		// Only run browser-specific cleanup on client side
 		if (typeof window !== 'undefined') {
-			// Remove global keyboard listener (must match capture: true)
 			window.removeEventListener('keydown', handleGlobalKeydown, { capture: true });
-			
-			// Clear scan timeout
-			if (scanTimeout) {
-				clearTimeout(scanTimeout);
-			}
-			
-			// Disconnect USB scanner
+			if (scanTimeout) clearTimeout(scanTimeout);
 			disconnectUSBScanner();
 		}
-		
-		// Stop camera on unmount
-		if (cameraRef && cameraRef.stopCamera) {
-			cameraRef.stopCamera();
-		}
+		stopCameraPreview();
 	});
 </script>
 
@@ -560,13 +487,40 @@
 
 			<!-- Verification Section -->
 			<section class="verification-section">
+				<!-- Always show camera preview -->
+				<div class="camera-preview-container">
+					<div class="video-wrapper">
+						<video 
+							bind:this={videoElement} 
+							autoplay 
+							playsinline 
+							muted
+							class="video-element"
+						>
+							<track kind="captions" src="" srclang="en" label="No captions" default />
+						</video>
+						{#if cameraReady}
+							<div class="camera-status {recognitionActive ? 'active' : 'standby'}">
+								<span class="status-dot"></span>
+								<span class="status-text">
+									{recognitionActive ? 'VERIFYING' : 'READY'}
+								</span>
+							</div>
+						{:else}
+							<div class="camera-loading">
+								<p>📷 Initializing camera...</p>
+							</div>
+						{/if}
+					</div>
+				</div>
+
 				{#if step === 'scan'}
 					<div class="step-container">
-						<h2 class="step-title">STEP 1: SCAN STUDENT ID</h2>
+						<h2 class="step-title">SCAN STUDENT ID TO BEGIN</h2>
 						
 						<div class="scanner-box">
 							<div class="scanner-icon">
-								<svg width="120" height="120" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+								<svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 									<rect x="3" y="5" width="18" height="14" rx="2" />
 									<line x1="3" y1="10" x2="21" y2="10" />
 									<line x1="7" y1="15" x2="7" y2="15" />
@@ -577,13 +531,12 @@
 							<h3 class="scanner-instruction">SCAN OR SWIPE STUDENT ID CARD</h3>
 							<p class="scanner-detail">
 								{#if scannerConnected}
-									✅ USB Scanner connected - Just scan your ID!
+									✅ USB Scanner connected
 								{:else}
-									Scanner in keyboard mode - Scan will auto-detect
+									Keyboard mode active
 								{/if}
 							</p>
 							
-							<!-- Scanner connection button -->
 							<div class="scanner-controls">
 								{#if !scannerConnected}
 									<button class="btn-scanner" onclick={connectUSBScanner}>
@@ -591,7 +544,7 @@
 									</button>
 								{:else}
 									<button class="btn-scanner btn-disconnect" onclick={disconnectUSBScanner}>
-										⏏️ DISCONNECT SCANNER
+										⏏️ DISCONNECT
 									</button>
 								{/if}
 							</div>
@@ -611,24 +564,15 @@
 									<p>{scanError}</p>
 								</div>
 							{/if}
-							
-							{#if scannedStudent}
-								<div class="scanned-info">
-									<h4>✓ Valid Student</h4>
-									<p>Name: {scannedStudent.name}</p>
-									<p>ID: {scannedStudent.id}</p>
-								</div>
-							{/if}
 						</div>
 					</div>
 				{:else if step === 'verification'}
 					<div class="step-container">
-						<h2 class="step-title">STEP 2: FACE VERIFICATION</h2>
-						<Camera bind:this={cameraRef} />
-						{#if studentStore.currentStudent}
+						<h2 class="step-title">VERIFYING FACE...</h2>
+						{#if studentStore.currentStudent && videoElement && recognitionActive}
 							<FaceMatch
 								bind:this={faceMatchRef}
-								videoElement={cameraRef?.getVideoElement()}
+								videoElement={videoElement}
 								student={studentStore.currentStudent}
 								onComplete={handleVerificationComplete}
 							/>
@@ -636,11 +580,12 @@
 					</div>
 				{:else if step === 'result'}
 					<div class="result-container">
-						<h2 class="result-title">
-							{studentStore.verificationStatus === 'success' ? '✓ VERIFICATION SUCCESS' : '✗ VERIFICATION FAILED'}
+						<h2 class="result-title {studentStore.verificationStatus === 'success' ? 'success' : 'failed'}">
+							{studentStore.verificationStatus === 'success' ? '✓ VERIFIED' : '✗ FAILED'}
 						</h2>
-						<p class="result-detail">Resetting in 5 seconds...</p>
-						<button class="btn-action" onclick={resetVerification}>SCAN NEXT STUDENT</button>
+						{#if scannedStudent}
+							<p class="result-name">{scannedStudent.name}</p>
+						{/if}
 					</div>
 				{/if}
 			</section>
@@ -661,7 +606,11 @@
 </div>
 
 <!-- Consent Dialog -->
-<ConsentDialog bind:open={showConsent} />
+<ConsentDialog 
+	bind:open={showConsent} 
+	onAccept={() => { showConsent = false; }}
+	onDecline={() => { showConsent = false; scanError = 'Consent declined'; }}
+/>
 
 <style>
 	:global(body) {
@@ -847,6 +796,74 @@
 		padding: 32px;
 	}
 
+	/* Camera Preview - Always visible */
+	.camera-preview-container {
+		margin-bottom: 24px;
+	}
+
+	.video-wrapper {
+		position: relative;
+		width: 100%;
+		max-width: 640px;
+		margin: 0 auto;
+		border: 2px solid #383838;
+		background: #000;
+	}
+
+	.video-element {
+		width: 100%;
+		height: auto;
+		min-height: 360px;
+		display: block;
+		object-fit: cover;
+	}
+
+	.camera-status {
+		position: absolute;
+		top: 12px;
+		right: 12px;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 8px 16px;
+		border: 2px solid #383838;
+		font-family: 'JetBrains Mono', monospace;
+		font-size: 12px;
+		font-weight: bold;
+		text-transform: uppercase;
+	}
+
+	.camera-status.standby {
+		background: rgba(0, 122, 255, 0.9);
+		color: #ffffff;
+	}
+
+	.camera-status.active {
+		background: rgba(52, 199, 89, 0.9);
+		color: #ffffff;
+	}
+
+	.camera-status .status-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: #ffffff;
+	}
+
+	.camera-status.active .status-dot {
+		animation: pulse 1s ease-in-out infinite;
+	}
+
+	.camera-loading {
+		position: absolute;
+		top: 50%;
+		left: 50%;
+		transform: translate(-50%, -50%);
+		color: #ffffff;
+		font-family: 'JetBrains Mono', monospace;
+		font-size: 14px;
+	}
+
 	.step-container {
 		display: flex;
 		flex-direction: column;
@@ -861,6 +878,7 @@
 		margin: 0;
 		padding-bottom: 16px;
 		border-bottom: 2px solid #383838;
+		text-align: center;
 	}
 
 	.btn-action {
@@ -885,7 +903,7 @@
 
 	.result-container {
 		text-align: center;
-		padding: 64px 32px;
+		padding: 32px;
 	}
 
 	.result-title {
@@ -893,7 +911,22 @@
 		font-weight: bold;
 		text-transform: uppercase;
 		letter-spacing: 1px;
-		margin: 0 0 32px 0;
+		margin: 0 0 16px 0;
+	}
+
+	.result-title.success {
+		color: #34c759;
+	}
+
+	.result-title.failed {
+		color: #ff3b30;
+	}
+
+	.result-name {
+		font-size: 20px;
+		font-weight: bold;
+		margin: 0 0 16px 0;
+		color: #383838;
 	}
 	
 	.result-detail {
@@ -907,8 +940,8 @@
 		display: flex;
 		flex-direction: column;
 		align-items: center;
-		gap: 24px;
-		padding: 64px 32px;
+		gap: 16px;
+		padding: 32px;
 		background: #f4efea;
 		border: 2px solid #383838;
 	}
@@ -998,27 +1031,6 @@
 
 	.scan-error p {
 		margin: 0;
-	}
-
-	.scanned-info {
-		padding: 24px;
-		background: #34c759;
-		color: #ffffff;
-		border: 2px solid #383838;
-		text-align: center;
-	}
-
-	.scanned-info h4 {
-		font-size: 18px;
-		font-weight: bold;
-		text-transform: uppercase;
-		letter-spacing: 0.6px;
-		margin: 0 0 12px 0;
-	}
-
-	.scanned-info p {
-		font-size: 14px;
-		margin: 4px 0;
 	}
 
 	/* Error Alert */

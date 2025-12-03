@@ -2,6 +2,10 @@
 // Dynamic import to avoid SSR issues
 let faceapi: any = null;
 
+// Standard dimensions for all face processing
+const TARGET_WIDTH = 640;
+const TARGET_HEIGHT = 480;
+
 async function loadFaceAPI() {
 	if (faceapi) return faceapi;
 	if (typeof window === 'undefined') {
@@ -33,16 +37,87 @@ export async function loadModels(onProgress?: (progress: number) => void): Promi
 	console.log('✅ Face detection models loaded');
 }
 
+/**
+ * Center-crop an image to target dimensions without stretching/compressing.
+ * If the source is larger than target, it crops from center.
+ * Returns a canvas with exactly TARGET_WIDTH x TARGET_HEIGHT dimensions.
+ */
+export function centerCropToCanvas(
+	source: HTMLVideoElement | HTMLImageElement | HTMLCanvasElement,
+	applyGrayscale: boolean = false
+): HTMLCanvasElement {
+	const canvas = document.createElement('canvas');
+	canvas.width = TARGET_WIDTH;
+	canvas.height = TARGET_HEIGHT;
+	const ctx = canvas.getContext('2d');
+	if (!ctx) throw new Error('Could not get canvas context');
+
+	// Get source dimensions
+	let srcWidth: number, srcHeight: number;
+	if (source instanceof HTMLVideoElement) {
+		srcWidth = source.videoWidth;
+		srcHeight = source.videoHeight;
+	} else if (source instanceof HTMLImageElement) {
+		srcWidth = source.naturalWidth || source.width;
+		srcHeight = source.naturalHeight || source.height;
+	} else {
+		srcWidth = source.width;
+		srcHeight = source.height;
+	}
+
+	// Calculate the scaling factor to fill the target (cover strategy)
+	const scale = Math.max(TARGET_WIDTH / srcWidth, TARGET_HEIGHT / srcHeight);
+	const scaledWidth = srcWidth * scale;
+	const scaledHeight = srcHeight * scale;
+
+	// Calculate crop offsets to center the image
+	const offsetX = (scaledWidth - TARGET_WIDTH) / 2;
+	const offsetY = (scaledHeight - TARGET_HEIGHT) / 2;
+
+	// Draw the centered, cropped image
+	ctx.drawImage(
+		source,
+		offsetX / scale, offsetY / scale, // Source position (in original coords)
+		TARGET_WIDTH / scale, TARGET_HEIGHT / scale, // Source dimensions to extract
+		0, 0, // Destination position
+		TARGET_WIDTH, TARGET_HEIGHT // Destination dimensions
+	);
+
+	// Apply grayscale if requested (for registration to improve TinyFace accuracy)
+	if (applyGrayscale) {
+		const imageData = ctx.getImageData(0, 0, TARGET_WIDTH, TARGET_HEIGHT);
+		const data = imageData.data;
+		for (let i = 0; i < data.length; i += 4) {
+			const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+			data[i] = gray;     // R
+			data[i + 1] = gray; // G
+			data[i + 2] = gray; // B
+			// Alpha stays the same
+		}
+		ctx.putImageData(imageData, 0, 0);
+	}
+
+	return canvas;
+}
+
 export async function detectFace(
-	imageElement: HTMLImageElement | HTMLVideoElement | HTMLCanvasElement
+	imageElement: HTMLImageElement | HTMLVideoElement | HTMLCanvasElement,
+	useGrayscale: boolean = false
 ): Promise<any | null> {
 	if (!modelsLoaded) {
 		throw new Error('Models not loaded. Call loadModels() first.');
 	}
 
 	const faceapiModule = await loadFaceAPI();
+	
+	// Pre-process: center-crop to 640x480 without distortion
+	const processedCanvas = centerCropToCanvas(imageElement, useGrayscale);
+	
 	const detection = await faceapiModule
-		.detectSingleFace(imageElement, new faceapiModule.TinyFaceDetectorOptions())
+		.detectSingleFace(processedCanvas, new faceapiModule.TinyFaceDetectorOptions({
+			inputSize: 416, // Smaller input for faster detection
+			scoreThreshold: 0.5
+		}))
 		.withFaceLandmarks()
 		.withFaceDescriptor();
 
@@ -50,15 +125,23 @@ export async function detectFace(
 }
 
 export async function detectAllFaces(
-	imageElement: HTMLImageElement | HTMLVideoElement | HTMLCanvasElement
+	imageElement: HTMLImageElement | HTMLVideoElement | HTMLCanvasElement,
+	useGrayscale: boolean = false
 ): Promise<any[]> {
 	if (!modelsLoaded) {
 		throw new Error('Models not loaded. Call loadModels() first.');
 	}
 
 	const faceapiModule = await loadFaceAPI();
+	
+	// Pre-process: center-crop to 640x480 without distortion
+	const processedCanvas = centerCropToCanvas(imageElement, useGrayscale);
+	
 	const detections = await faceapiModule
-		.detectAllFaces(imageElement, new faceapiModule.TinyFaceDetectorOptions())
+		.detectAllFaces(processedCanvas, new faceapiModule.TinyFaceDetectorOptions({
+			inputSize: 416,
+			scoreThreshold: 0.5
+		}))
 		.withFaceLandmarks()
 		.withFaceDescriptors();
 
@@ -78,9 +161,14 @@ export async function compareFaces(
 	return { match, distance, confidence };
 }
 
-export async function captureFrame(videoElement: HTMLVideoElement): Promise<HTMLCanvasElement> {
-	const canvas = document.createElement('canvas');
-
+/**
+ * Capture a frame from video, center-cropped to exactly 640x480.
+ * No stretching or compression - just crops from center.
+ */
+export async function captureFrame(
+	videoElement: HTMLVideoElement,
+	applyGrayscale: boolean = false
+): Promise<HTMLCanvasElement> {
 	// Check if video is ready
 	if (videoElement.videoWidth === 0 || videoElement.videoHeight === 0) {
 		throw new Error('Video element not ready - no video dimensions');
@@ -90,14 +178,21 @@ export async function captureFrame(videoElement: HTMLVideoElement): Promise<HTML
 		throw new Error('Video element has no source');
 	}
 
-	canvas.width = videoElement.videoWidth;
-	canvas.height = videoElement.videoHeight;
-	const ctx = canvas.getContext('2d');
+	// Use center-crop to get exactly 640x480 without distortion
+	return centerCropToCanvas(videoElement, applyGrayscale);
+}
 
-	if (!ctx) throw new Error('Could not get canvas context');
-
-	ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
-	return canvas;
+/**
+ * Capture a frame and return as base64 JPEG for sending to server.
+ * Always outputs 640x480 center-cropped image.
+ */
+export function captureFrameAsBase64(
+	videoElement: HTMLVideoElement,
+	applyGrayscale: boolean = false,
+	quality: number = 0.92
+): string {
+	const canvas = centerCropToCanvas(videoElement, applyGrayscale);
+	return canvas.toDataURL('image/jpeg', quality);
 }
 
 export function getModelsLoaded(): boolean {

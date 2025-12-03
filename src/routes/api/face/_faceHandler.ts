@@ -4,7 +4,7 @@ import * as faceapi from 'face-api.js';
 import * as canvasPkg from 'canvas';
 import { getConnection } from '$lib/services/mariadb';
 
-const { Canvas, Image, ImageData, loadImage } = canvasPkg;
+const { Canvas, Image, ImageData, loadImage, createCanvas } = canvasPkg;
 // @ts-ignore
 faceapi.env.monkeyPatch({ Canvas, Image, ImageData });
 
@@ -12,6 +12,11 @@ const PROJECT_ROOT = path.resolve(process.cwd());
 const FACE_DIR = path.join(PROJECT_ROOT, 'static', 'face');
 const DESC_DIR = path.join(PROJECT_ROOT, 'static', 'descriptors');
 const MODEL_PATH = path.join(PROJECT_ROOT, 'static', 'models');
+
+// Target dimensions for face detection
+const TARGET_WIDTH = 640;
+const TARGET_HEIGHT = 480;
+const TARGET_ASPECT = TARGET_WIDTH / TARGET_HEIGHT;
 
 if (!fs.existsSync(FACE_DIR)) fs.mkdirSync(FACE_DIR, { recursive: true });
 if (!fs.existsSync(DESC_DIR)) fs.mkdirSync(DESC_DIR, { recursive: true });
@@ -35,14 +40,75 @@ function bufferFromBase64(base64: string): Buffer {
 	return Buffer.from(base64.replace(/^data:image\/\w+;base64,/, ''), 'base64');
 }
 
-function imageFromBase64(base64: string): Promise<any> {
+/**
+ * Center-crop and convert to grayscale for consistent face detection
+ * Matches client-side preprocessing for accuracy
+ */
+function preprocessImage(img: any): any {
+	const canvas = createCanvas(TARGET_WIDTH, TARGET_HEIGHT);
+	const ctx = canvas.getContext('2d');
+	
+	const srcWidth = img.width || img.naturalWidth || TARGET_WIDTH;
+	const srcHeight = img.height || img.naturalHeight || TARGET_HEIGHT;
+	const srcAspect = srcWidth / srcHeight;
+	
+	// Calculate center crop dimensions
+	let cropWidth: number;
+	let cropHeight: number;
+	let cropX: number;
+	let cropY: number;
+	
+	if (srcAspect > TARGET_ASPECT) {
+		// Source is wider - crop sides
+		cropHeight = srcHeight;
+		cropWidth = srcHeight * TARGET_ASPECT;
+		cropX = (srcWidth - cropWidth) / 2;
+		cropY = 0;
+	} else {
+		// Source is taller - crop top/bottom
+		cropWidth = srcWidth;
+		cropHeight = srcWidth / TARGET_ASPECT;
+		cropX = 0;
+		cropY = (srcHeight - cropHeight) / 2;
+	}
+	
+	// Draw center-cropped and scaled image
+	ctx.drawImage(
+		img,
+		cropX, cropY, cropWidth, cropHeight,
+		0, 0, TARGET_WIDTH, TARGET_HEIGHT
+	);
+	
+	// Apply grayscale for consistent face detection
+	const imageData = ctx.getImageData(0, 0, TARGET_WIDTH, TARGET_HEIGHT);
+	const data = imageData.data;
+	for (let i = 0; i < data.length; i += 4) {
+		const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+		data[i] = gray;     // R
+		data[i + 1] = gray; // G
+		data[i + 2] = gray; // B
+		// Alpha stays the same
+	}
+	ctx.putImageData(imageData, 0, 0);
+	
+	return canvas;
+}
+
+async function imageFromBase64(base64: string, preprocess: boolean = true): Promise<any> {
 	try {
 		// Ensure proper data URI - assume JPEG since client sends JPEG
 		const dataUri = base64.startsWith('data:image') ? base64 : `data:image/jpeg;base64,${base64}`;
 		console.log('🔄 Loading image from data URI, length:', dataUri.length);
-		const result = loadImage(dataUri);
-		console.log('✅ Image load promise created');
-		return result;
+		const img = await loadImage(dataUri);
+		console.log(`✅ Image loaded: ${img.width}x${img.height}`);
+		
+		// Apply preprocessing if requested
+		if (preprocess) {
+			console.log('🔄 Applying center-crop and grayscale preprocessing...');
+			return preprocessImage(img);
+		}
+		
+		return img;
 	} catch (error) {
 		console.error('❌ Error creating image from base64:', error);
 		throw new Error('Unsupported image type');
@@ -65,7 +131,8 @@ export async function handleCheckOrientation(request: Request): Promise<Response
 			});
 		}
 
-		const img = await imageFromBase64(image);
+		// Use preprocessed image (center-crop + grayscale)
+		const img = await imageFromBase64(image, true);
 		const detection = await faceapi
 			.detectSingleFace(img, mtcnnOptions)
 			.withFaceLandmarks()
@@ -141,8 +208,9 @@ export async function handleRegister(request: Request): Promise<Response> {
 			}
 
 			console.log(`🔍 Processing image ${i}, size: ${images[imageKey].length} chars`);
-			const img = await imageFromBase64(images[imageKey]);
-			console.log(`✅ Image ${i} loaded: ${img.width}x${img.height}`);
+			// Use preprocessed image (center-crop + grayscale) for consistent detection
+			const img = await imageFromBase64(images[imageKey], true);
+			console.log(`✅ Image ${i} preprocessed: ${TARGET_WIDTH}x${TARGET_HEIGHT}`);
 			
 			const detection = await faceapi
 				.detectSingleFace(img, mtcnnOptions)
@@ -241,8 +309,9 @@ export async function handleRecognize(request: Request): Promise<Response> {
 
 		console.log(`📸 [${timestamp}] Processing image, length: ${image.length} chars`);
 
-		const img = await imageFromBase64(image);
-		console.log(`✅ [${timestamp}] Image loaded: ${img.width}x${img.height}`);
+		// Use preprocessed image (center-crop + grayscale) for consistent recognition
+		const img = await imageFromBase64(image, true);
+		console.log(`✅ [${timestamp}] Image preprocessed: ${TARGET_WIDTH}x${TARGET_HEIGHT}`);
 
 		const detection = await faceapi
 			.detectSingleFace(img, mtcnnOptions)
