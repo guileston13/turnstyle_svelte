@@ -33,16 +33,17 @@
 	let isProcessingScan = $state<boolean>(false);
 	let scannerAutoConnecting = $state<boolean>(false);
 	
-	// Keyboard buffer for barcode scanner
-	const SCAN_SPEED_THRESHOLD = 100;
-	const SCAN_COMPLETE_DELAY = 150;
+	// Keyboard buffer for barcode scanner (fallback mode - WebHID is faster)
+	const SCAN_SPEED_THRESHOLD = 50;  // Reduced from 100ms for faster detection
+	const SCAN_COMPLETE_DELAY = 80;   // Reduced from 150ms for faster processing
 	let scanStartTime = $state<number>(0);
 	let isScanInProgress = $state<boolean>(false);
 
 	// Start camera immediately on mount for preview (always on)
+	// Camera stream is always running - only face recognition toggles
 	async function startCameraPreview() {
 		try {
-			console.log('🎥 Starting camera preview...');
+			console.log('🎥 Starting camera stream (always on)...');
 			const stream = await navigator.mediaDevices.getUserMedia({
 				video: {
 					facingMode: 'user',
@@ -53,22 +54,23 @@
 			
 			cameraStream = stream;
 			
-			// Wait for video element to be ready
-			await new Promise<void>((resolve) => {
-				const checkVideo = () => {
-					if (videoElement) {
-						videoElement.srcObject = stream;
-						videoElement.play().then(() => {
-							cameraReady = true;
-							console.log('🎥 Camera preview active');
-							resolve();
-						});
-					} else {
-						setTimeout(checkVideo, 50);
-					}
-				};
-				checkVideo();
-			});
+			// Attach to video element when ready (non-blocking check)
+			const attachStream = () => {
+				if (videoElement) {
+					videoElement.srcObject = stream;
+					videoElement.play().then(() => {
+						cameraReady = true;
+						console.log('🎥 Camera stream active and ready');
+					}).catch(err => {
+						console.error('Video play error:', err);
+					});
+				} else {
+					// Retry quickly if element not ready yet
+					requestAnimationFrame(attachStream);
+				}
+			};
+			attachStream();
+			
 		} catch (err) {
 			console.error('🎥 Camera error:', err);
 			scanError = '❌ Camera access denied. Please allow camera access.';
@@ -176,8 +178,11 @@
 		}
 	}
 
-	// Global keyboard listener for barcode scanner
+	// Global keyboard listener for barcode scanner (fallback when WebHID not connected)
 	function handleGlobalKeydown(event: KeyboardEvent) {
+		// 🚀 Skip keyboard processing if WebHID scanner is connected (faster)
+		if (scannerConnected) return;
+		
 		const now = Date.now();
 		const timeSinceLastKey = now - lastKeyTime;
 		
@@ -312,7 +317,7 @@
 		}
 	}
 	
-	// Set up HID input listener for scanner
+	// Set up HID input listener for scanner - FAST direct processing
 	function setupHIDListener(device: any) {
 		let hidBuffer = '';
 		
@@ -325,18 +330,24 @@
 				if (char) {
 					if (char === '\n') {
 						if (hidBuffer.length > 0) {
-							processBarcodeData(hidBuffer);
+							// 🚀 Process immediately - no state update delay
+							const barcodeData = hidBuffer;
 							hidBuffer = '';
+							scannedInput = '';
+							processBarcodeData(barcodeData);
 						}
 					} else {
 						hidBuffer += char;
-						scannedInput = hidBuffer;
+						// Only update UI periodically, not every character
+						if (hidBuffer.length % 5 === 0 || hidBuffer.length < 5) {
+							scannedInput = hidBuffer;
+						}
 					}
 				}
 			}
 		});
 		
-		console.log('🎧 HID input listener attached');
+		console.log('🎧 WebHID input listener attached - FAST MODE');
 	}
 
 	// USB Scanner functions
@@ -488,24 +499,32 @@
 		try {
 			await initDB();
 			
-			// Load face models first
-			await loadModels((progress) => {
+			// 🚀 Start camera IMMEDIATELY in parallel with model loading
+			// Camera is always on - only face recognition toggles on/off
+			const cameraPromise = startCameraPreview();
+			
+			// Load face models in parallel
+			const modelsPromise = loadModels((progress) => {
 				modelProgress = progress;
 			});
-			modelsLoading = false;
 			
-			// Auto-start camera preview immediately after models load
-			await startCameraPreview();
-			
+			// Set up keyboard listener immediately (no waiting)
 			window.addEventListener('keydown', handleGlobalKeydown, { capture: true });
 			console.log('🔌 Global keyboard listener added');
 			
+			// Focus input immediately
 			setTimeout(() => {
 				document.getElementById('barcode-input')?.focus();
-			}, 500);
+			}, 50);
 			
-			// Auto-connect to previously paired HID devices (no user gesture needed)
-			await autoConnectScanner();
+			// Auto-connect scanner in background (non-blocking)
+			autoConnectScanner();
+			
+			// Wait for both camera and models to be ready
+			await Promise.all([cameraPromise, modelsPromise]);
+			modelsLoading = false;
+			
+			console.log('✅ System ready - camera always on, face recognition on demand');
 			
 		} catch (err) {
 			console.error('Failed to initialize:', err);
