@@ -1,7 +1,7 @@
 // Endpoint to trigger turnstile unlock/lock
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { broadcastTurnstileEvent } from '../+server';
+import { broadcastTurnstileEvent } from '$lib/services/turnstile-sse';
 
 export const POST: RequestHandler = async ({ request }) => {
 	try {

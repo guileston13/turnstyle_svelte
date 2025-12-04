@@ -1,6 +1,7 @@
 // Face detection service with Web Worker support
 // Dynamic import to avoid SSR issues
 let faceapi: any = null;
+let tf: any = null;
 
 // Standard dimensions for all face processing
 const TARGET_WIDTH = 640;
@@ -11,6 +12,18 @@ async function loadFaceAPI() {
 	if (typeof window === 'undefined') {
 		throw new Error('Face API can only be used in browser environment');
 	}
+	
+	// Import TensorFlow.js and set backend to WebGL (avoid WASM 404 errors)
+	try {
+		tf = await import('@tensorflow/tfjs');
+		// Force WebGL backend instead of WASM to avoid 404 errors
+		await tf.setBackend('webgl');
+		await tf.ready();
+		console.log('✅ TensorFlow.js backend:', tf.getBackend());
+	} catch (err) {
+		console.warn('⚠️ Could not set TensorFlow backend:', err);
+	}
+	
 	const faceapiModule = await import('@vladmandic/face-api');
 	faceapi = faceapiModule;
 	return faceapi;

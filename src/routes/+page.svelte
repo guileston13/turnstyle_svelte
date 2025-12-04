@@ -31,6 +31,7 @@
 	let lastKeyTime = $state<number>(0);
 	let scanTimeout: any = null;
 	let isProcessingScan = $state<boolean>(false);
+	let scannerAutoConnecting = $state<boolean>(false);
 	
 	// Keyboard buffer for barcode scanner
 	const SCAN_SPEED_THRESHOLD = 100;
@@ -268,6 +269,76 @@
 		}
 	}
 	
+	// Auto-connect to previously paired HID scanner devices
+	async function autoConnectScanner() {
+		if (!('hid' in navigator)) {
+			console.log('⚠️ WebHID not supported, using keyboard mode');
+			return;
+		}
+		
+		scannerAutoConnecting = true;
+		
+		try {
+			// Get previously paired devices (no user gesture needed!)
+			const devices = await (navigator as any).hid.getDevices();
+			console.log('🔍 Found previously paired HID devices:', devices.length);
+			
+			if (devices.length > 0) {
+				// Find Yuriot ScanCode Box or any scanner
+				let scanner = devices.find((d: any) => 
+					d.productName?.toLowerCase().includes('yuriot') ||
+					d.productName?.toLowerCase().includes('scan') ||
+					d.productName?.toLowerCase().includes('barcode')
+				) || devices[0];
+				
+				if (!scanner.opened) {
+					await scanner.open();
+				}
+				
+				scannerDevice = scanner;
+				scannerConnected = true;
+				console.log('✅ Auto-connected to scanner:', scanner.productName);
+				
+				// Set up input listener
+				setupHIDListener(scanner);
+			} else {
+				console.log('📋 No previously paired devices. Keyboard mode active.');
+				console.log('💡 Connect scanner once manually, then it will auto-connect on refresh.');
+			}
+		} catch (err) {
+			console.log('⚠️ Could not auto-connect HID devices:', err);
+		} finally {
+			scannerAutoConnecting = false;
+		}
+	}
+	
+	// Set up HID input listener for scanner
+	function setupHIDListener(device: any) {
+		let hidBuffer = '';
+		
+		device.addEventListener('inputreport', (event: any) => {
+			const { data } = event;
+			for (let i = 2; i < data.byteLength; i++) {
+				const keyCode = data.getUint8(i);
+				if (keyCode === 0) continue;
+				const char = hidKeyCodeToChar(keyCode, data.getUint8(0));
+				if (char) {
+					if (char === '\n') {
+						if (hidBuffer.length > 0) {
+							processBarcodeData(hidBuffer);
+							hidBuffer = '';
+						}
+					} else {
+						hidBuffer += char;
+						scannedInput = hidBuffer;
+					}
+				}
+			}
+		});
+		
+		console.log('🎧 HID input listener attached');
+	}
+
 	// USB Scanner functions
 	async function connectUSBScanner() {
 		try {
@@ -277,11 +348,24 @@
 				return;
 			}
 			
-			const devices = await (navigator as any).hid.requestDevice({ filters: [] });
+			// Request device - this REQUIRES user gesture (click)
+			const devices = await (navigator as any).hid.requestDevice({ 
+				filters: [
+					// Add common barcode scanner vendor IDs
+					{ vendorId: 0x05e0 }, // Symbol
+					{ vendorId: 0x0c2e }, // Honeywell
+					{ vendorId: 0x05f9 }, // Datalogic
+				]
+			});
 			
 			if (devices.length === 0) {
-				scanError = '❌ No scanner selected';
-				return;
+				// Try without filters
+				const allDevices = await (navigator as any).hid.requestDevice({ filters: [] });
+				if (allDevices.length === 0) {
+					scanError = '❌ No scanner selected';
+					return;
+				}
+				devices.push(...allDevices);
 			}
 			
 			const device = devices[0];
@@ -292,26 +376,9 @@
 			scanError = '';
 			console.log('✅ Scanner connected:', device.productName);
 			
-			let hidBuffer = '';
-			device.addEventListener('inputreport', (event: any) => {
-				const { data } = event;
-				for (let i = 2; i < data.byteLength; i++) {
-					const keyCode = data.getUint8(i);
-					if (keyCode === 0) continue;
-					const char = hidKeyCodeToChar(keyCode, data.getUint8(0));
-					if (char) {
-						if (char === '\n') {
-							if (hidBuffer.length > 0) {
-								processBarcodeData(hidBuffer);
-								hidBuffer = '';
-							}
-						} else {
-							hidBuffer += char;
-							scannedInput = hidBuffer;
-						}
-					}
-				}
-			});
+			// Set up listener
+			setupHIDListener(device);
+			
 		} catch (err) {
 			console.error('Scanner connection error:', err);
 			scanError = '❌ Failed to connect scanner: ' + String(err);
@@ -427,7 +494,7 @@
 			});
 			modelsLoading = false;
 			
-			// Start camera preview immediately after models load
+			// Auto-start camera preview immediately after models load
 			await startCameraPreview();
 			
 			window.addEventListener('keydown', handleGlobalKeydown, { capture: true });
@@ -437,21 +504,9 @@
 				document.getElementById('barcode-input')?.focus();
 			}, 500);
 			
-			// Auto-reconnect HID devices
-			if ('hid' in navigator) {
-				try {
-					const devices = await (navigator as any).hid.getDevices();
-					if (devices.length > 0) {
-						const device = devices[0];
-						if (!device.opened) await device.open();
-						scannerDevice = device;
-						scannerConnected = true;
-						console.log('✅ Auto-reconnected to scanner:', device.productName);
-					}
-				} catch (err) {
-					console.log('⚠️ Could not auto-reconnect to HID devices:', err);
-				}
-			}
+			// Auto-connect to previously paired HID devices (no user gesture needed)
+			await autoConnectScanner();
+			
 		} catch (err) {
 			console.error('Failed to initialize:', err);
 			studentStore.errorMessage = 'Failed to initialize system. Please refresh.';
@@ -518,8 +573,8 @@
 				</div>
 				<div class="stat-card">
 					<h3 class="stat-label">SCANNER</h3>
-					<p class="stat-value" style="color: {scannerConnected ? '#34c759' : '#007aff'}">
-						{scannerConnected ? 'USB CONNECTED' : 'KEYBOARD MODE'}
+					<p class="stat-value" style="color: {scannerConnected ? '#34c759' : scannerAutoConnecting ? '#ff9500' : '#007aff'}">
+						{scannerConnected ? 'USB CONNECTED' : scannerAutoConnecting ? 'CONNECTING...' : 'KEYBOARD MODE'}
 					</p>
 				</div>
 			</section>
