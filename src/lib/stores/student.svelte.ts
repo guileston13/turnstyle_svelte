@@ -2,7 +2,7 @@
 import type { Student } from '../services/db';
 
 let currentStudent = $state<Student | null>(null);
-let verificationStatus = $state<'idle' | 'recognizing' | 'recognized' | 'face_matching' | 'success' | 'failed'>('idle');
+let verificationStatus = $state<'idle' | 'qr_scanning' | 'recognizing' | 'recognized' | 'face_matching' | 'success' | 'failed'>('idle');
 let errorMessage = $state<string | null>(null);
 let confidenceScore = $state<number>(0);
 
@@ -16,7 +16,7 @@ export const studentStore = {
 	get verificationStatus() {
 		return verificationStatus;
 	},
-	set verificationStatus(value: 'idle' | 'recognizing' | 'recognized' | 'face_matching' | 'success' | 'failed') {
+	set verificationStatus(value: 'idle' | 'qr_scanning' | 'recognizing' | 'recognized' | 'face_matching' | 'success' | 'failed') {
 		verificationStatus = value;
 	},
 	get errorMessage() {

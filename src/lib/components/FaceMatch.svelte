@@ -22,10 +22,10 @@
 	// 🎯 Guard 2: Throttle tracking
 	let lastDetectionTime = $state<number>(0);
 
-	// Faster verification interval for better UX
-	const VERIFICATION_INTERVAL = 800; // 800ms for fast detection
-	const MIN_DETECTION_GAP = 600; // Minimum gap between detections
-	const MAX_ATTEMPTS = 8; // Max attempts before failing
+	// 🚀 FAST verification settings
+	const VERIFICATION_INTERVAL = 500; // 500ms for faster detection (was 800ms)
+	const MIN_DETECTION_GAP = 400; // Minimum gap between detections (was 600ms)
+	const MAX_ATTEMPTS = 10; // Max attempts before failing
 
 	let performFaceMatch = async () => {
 		// 🎯 GUARD 1: Prevent request queue buildup

@@ -24,17 +24,35 @@ if (!fs.existsSync(MODEL_PATH)) fs.mkdirSync(MODEL_PATH, { recursive: true });
 
 let modelsLoaded = false;
 
+// ============================================================================
+// 🚀 PERFORMANCE: In-memory descriptor cache (from final_attendance)
+// ============================================================================
+let descriptorCache = new Map<string, { descriptors: Float32Array[], name: string }>();
+let descriptorCacheLoadedAt = 0;
+const DESCRIPTOR_CACHE_TTL = 5 * 60 * 1000; // 5 minutes cache TTL
+let isLoadingDescriptorCache = false;
+
 export async function ensureModelsLoaded(): Promise<void> {
 	if (!modelsLoaded) {
 		await Promise.all([
-			faceapi.nets.mtcnn.loadFromDisk(MODEL_PATH),
+			faceapi.nets.tinyFaceDetector.loadFromDisk(MODEL_PATH),  // 🚀 FAST for login/recognition
+			faceapi.nets.mtcnn.loadFromDisk(MODEL_PATH),              // Accurate for registration
 			faceapi.nets.faceLandmark68Net.loadFromDisk(MODEL_PATH),
 			faceapi.nets.faceRecognitionNet.loadFromDisk(MODEL_PATH),
 		]);
-		console.log("✅ MTCNN + Landmarks + Recognition models loaded");
+		console.log("✅ TinyFace + MTCNN + Landmarks + Recognition models loaded");
 		modelsLoaded = true;
+		
+		// Preload descriptor cache on startup
+		await preloadDescriptorCache();
 	}
 }
+
+// 🚀 TinyFaceDetector options - FAST for login recognition
+const tinyFaceOptions = new faceapi.TinyFaceDetectorOptions({
+	inputSize: 416,       // 416 for server (good balance of speed/accuracy)
+	scoreThreshold: 0.5
+});
 
 function bufferFromBase64(base64: string): Buffer {
 	return Buffer.from(base64.replace(/^data:image\/\w+;base64,/, ''), 'base64');
@@ -119,6 +137,68 @@ const mtcnnOptions = new faceapi.MtcnnOptions({
 	minFaceSize: 50,
 	scaleFactor: 0.709
 });
+
+/**
+ * 🚀 Preload all student descriptors into memory cache
+ */
+async function preloadDescriptorCache(): Promise<void> {
+	if (isLoadingDescriptorCache) return;
+	isLoadingDescriptorCache = true;
+	
+	const startTime = Date.now();
+	try {
+		const descFiles = fs.readdirSync(DESC_DIR).filter(f => f.endsWith('.json'));
+		const newCache = new Map<string, { descriptors: Float32Array[], name: string }>();
+		
+		for (const descFile of descFiles) {
+			const studentId = descFile.replace('.json', '');
+			const filePath = path.join(DESC_DIR, descFile);
+			const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+			const descriptors = Array.isArray(data) ? data : data.descriptors;
+			
+			if (Array.isArray(descriptors)) {
+				// Pre-convert to Float32Arrays for faster euclidean distance
+				const optimizedDescriptors = descriptors.map(desc => {
+					const arr = Array.isArray(desc) ? desc : Object.values(desc);
+					return new Float32Array(arr as number[]);
+				});
+				
+				newCache.set(studentId, {
+					descriptors: optimizedDescriptors,
+					name: data.name || studentId
+				});
+			}
+		}
+		
+		descriptorCache = newCache;
+		descriptorCacheLoadedAt = Date.now();
+		console.log(`🚀 Descriptor cache loaded: ${newCache.size} students in ${Date.now() - startTime}ms`);
+	} catch (error) {
+		console.error('⚠️ Failed to preload descriptor cache:', error);
+	} finally {
+		isLoadingDescriptorCache = false;
+	}
+}
+
+/**
+ * Get cached descriptors, reloading if stale or empty
+ */
+async function getCachedDescriptors(): Promise<Map<string, { descriptors: Float32Array[], name: string }>> {
+	const now = Date.now();
+	if (descriptorCache.size === 0 || (now - descriptorCacheLoadedAt) > DESCRIPTOR_CACHE_TTL) {
+		await preloadDescriptorCache();
+	}
+	return descriptorCache;
+}
+
+/**
+ * Update cache after registration
+ */
+function updateStudentInCache(studentId: string, descriptors: number[][], name: string): void {
+	const optimizedDescriptors = descriptors.map(desc => new Float32Array(desc));
+	descriptorCache.set(studentId, { descriptors: optimizedDescriptors, name });
+	console.log(`🔄 Cache updated for student: ${studentId}`);
+}
 
 export async function handleCheckOrientation(request: Request): Promise<Response> {
 	await ensureModelsLoaded();
@@ -243,6 +323,9 @@ export async function handleRegister(request: Request): Promise<Response> {
 			registeredAt: new Date().toISOString()
 		};
 		fs.writeFileSync(descFile, JSON.stringify(descriptorData, null, 2));
+		
+		// 🚀 Update in-memory cache
+		updateStudentInCache(id, descriptors, name);
 
 		// Also save to students table
 		try {
@@ -293,7 +376,9 @@ export async function handleRegister(request: Request): Promise<Response> {
 }
 
 export async function handleRecognize(request: Request): Promise<Response> {
+	const requestStartTime = Date.now();
 	await ensureModelsLoaded();
+	
 	try {
 		const timestamp = new Date().toLocaleTimeString();
 		console.log(`\n🔍 [${timestamp}] Recognition request received`);
@@ -307,16 +392,18 @@ export async function handleRecognize(request: Request): Promise<Response> {
 			});
 		}
 
-		console.log(`📸 [${timestamp}] Processing image, length: ${image.length} chars`);
-
-		// Use preprocessed image (center-crop + grayscale) for consistent recognition
+		// Image decode
+		const imgDecodeStart = Date.now();
 		const img = await imageFromBase64(image, true);
-		console.log(`✅ [${timestamp}] Image preprocessed: ${TARGET_WIDTH}x${TARGET_HEIGHT}`);
+		console.log(`⏱️ Image decode + preprocess: ${Date.now() - imgDecodeStart}ms`);
 
+		// 🚀 TURBO: Use TinyFaceDetector for FAST login detection (5-10x faster than MTCNN)
+		const detectionStart = Date.now();
 		const detection = await faceapi
-			.detectSingleFace(img, mtcnnOptions)
+			.detectSingleFace(img, tinyFaceOptions)
 			.withFaceLandmarks()
 			.withFaceDescriptor();
+		console.log(`⏱️ TURBO Face detection: ${Date.now() - detectionStart}ms`);
 
 		if (!detection) {
 			console.log(`⚠️ [${timestamp}] No face detected in image`);
@@ -326,65 +413,117 @@ export async function handleRecognize(request: Request): Promise<Response> {
 			});
 		}
 
-		console.log(`✅ [${timestamp}] Face detected, comparing with database...`);
+		console.log(`✅ Face detected with confidence ${detection.detection.score.toFixed(3)}`);
 		const queryDescriptor = detection.descriptor;
+
+		// ============================================================================
+		// 🔥 TURBO MATCHING (from final_attendance)
+		// ============================================================================
+		
+		/**
+		 * 🔥 Quick reject using first 8 dimensions only
+		 * If partial distance already exceeds bestSoFar, reject immediately
+		 */
+		function quickReject(a: Float32Array, b: Float32Array, bestSoFar: number): boolean {
+			let s = 0;
+			for (let i = 0; i < 8; i++) {
+				const d = a[i] - b[i];
+				s += d * d;
+				if (s > bestSoFar) return true;
+			}
+			return false;
+		}
+
+		/**
+		 * 🔥 Full distance with early exit
+		 */
+		function fastDistanceEarly(a: Float32Array, b: Float32Array, threshold: number): number {
+			let sum = 0;
+			for (let i = 0; i < a.length; i++) {
+				const d = a[i] - b[i];
+				sum += d * d;
+				if (sum > threshold) return Infinity;
+			}
+			return sum;
+		}
+
 		let bestMatch: string | null = null;
 		let bestDistance = Infinity;
+		let bestName = '';
 
-		// Check all registered students
-		const descFiles = fs.readdirSync(DESC_DIR).filter(f => f.endsWith('.json'));
-		console.log(`📚 [${timestamp}] Checking against ${descFiles.length} registered students`);
+		// 🚀 Use cached descriptors + fast distance functions
+		const matchingStart = Date.now();
+		const cachedDescriptors = await getCachedDescriptors();
+		
+		// Convert query to Float32Array for fast comparison
+		const queryFloat32 = new Float32Array(queryDescriptor);
 
-		for (const descFile of descFiles) {
-			const studentId = descFile.replace('.json', '');
-			const data = JSON.parse(fs.readFileSync(path.join(DESC_DIR, descFile), 'utf8'));
-			const descriptors = Array.isArray(data) ? data : data.descriptors;
-
-			if (!Array.isArray(descriptors)) continue;
-
-			for (const desc of descriptors) {
-				const descriptorArray = Array.isArray(desc) ? desc : Object.values(desc);
-				const distance = faceapi.euclideanDistance(queryDescriptor, descriptorArray as number[]);
-				if (distance < bestDistance) {
-					bestDistance = distance;
-					bestMatch = studentId;
+		for (const [studentId, studentData] of cachedDescriptors) {
+			let studentMin = Infinity;
+			
+			for (const desc of studentData.descriptors) {
+				// 🔥 Quick reject using first 8 dimensions
+				if (quickReject(queryFloat32, desc, studentMin)) continue;
+				
+				// 🔥 Full distance with early exit
+				const dist = fastDistanceEarly(queryFloat32, desc, studentMin);
+				
+				if (dist < studentMin) {
+					studentMin = dist;
+					if (dist < bestDistance) {
+						bestDistance = dist;
+						bestMatch = studentId;
+						bestName = studentData.name;
+					}
 				}
 			}
 		}
+		
+		console.log(`⚡ TURBO matching (${cachedDescriptors.size} students): ${Date.now() - matchingStart}ms`);
 
+		// Convert squared distance to regular distance for threshold comparison
+		const actualDistance = Math.sqrt(bestDistance);
+		
 		const timestamp2 = new Date().toLocaleTimeString();
-		if (bestMatch && bestDistance < 0.6) {
-			// Get student name from students table
-			let studentName = bestMatch;
-			try {
-				const connection = await getConnection();
-				const [rows] = await connection.execute('SELECT name FROM students WHERE id = ?', [bestMatch]);
-				const students = rows as any[];
-				if (students && students.length > 0) {
-					studentName = students[0].name;
+		if (bestMatch && actualDistance < 0.6) {
+			// Get student name from cache or database
+			let studentName = bestName || bestMatch;
+			if (!studentName || studentName === bestMatch) {
+				try {
+					const connection = await getConnection();
+					const [rows] = await connection.execute('SELECT name FROM students WHERE id = ?', [bestMatch]);
+					const students = rows as any[];
+					if (students && students.length > 0) {
+						studentName = students[0].name;
+					}
+				} catch (nameError) {
+					console.error('Error fetching student name:', nameError);
 				}
-			} catch (nameError) {
-				console.error('Error fetching student name:', nameError);
 			}
 
 			console.log(`✅ [${timestamp2}] MATCH FOUND: ${studentName} (ID: ${bestMatch})`);
-			console.log(`   Distance: ${bestDistance.toFixed(3)}, Confidence: ${((1 - bestDistance) * 100).toFixed(1)}%`);
+			console.log(`   Distance: ${actualDistance.toFixed(3)}, Confidence: ${((1 - actualDistance) * 100).toFixed(1)}%`);
+			console.log(`⏱️ Total request time: ${Date.now() - requestStartTime}ms`);
 
 			return new Response(JSON.stringify({
 				message: `✅ Welcome back, ${studentName}!`,
 				studentId: bestMatch,
-				confidence: (1 - bestDistance).toFixed(2),
-				distance: bestDistance.toFixed(3),
-				imageUrl: `/face/${bestMatch}_pic1.png`
+				confidence: (1 - actualDistance).toFixed(2),
+				distance: actualDistance.toFixed(3),
+				imageUrl: `/face/${bestMatch}_pic1.png`,
+				timing: Date.now() - requestStartTime
 			}), {
 				status: 200,
 				headers: { 'Content-Type': 'application/json' }
 			});
 		} else {
-			console.log(`❌ [${timestamp2}] NO MATCH - Best distance: ${bestDistance.toFixed(3)} (threshold: 0.6)`);
+			console.log(`❌ [${timestamp2}] NO MATCH - Best distance: ${actualDistance.toFixed(3)} (threshold: 0.6)`);
+			console.log(`⏱️ Total request time: ${Date.now() - requestStartTime}ms`);
+			
 			return new Response(JSON.stringify({
 				message: '🚫 Face not recognized',
-				bestDistance: bestDistance.toFixed(3)
+				bestDistance: actualDistance.toFixed(3),
+				timing: Date.now() - requestStartTime
 			}), {
 				status: 200,
 				headers: { 'Content-Type': 'application/json' }

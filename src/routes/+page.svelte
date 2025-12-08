@@ -31,17 +31,19 @@
 	let lastKeyTime = $state<number>(0);
 	let scanTimeout: any = null;
 	let isProcessingScan = $state<boolean>(false);
+	let scannerAutoConnecting = $state<boolean>(false);
 	
-	// Keyboard buffer for barcode scanner
-	const SCAN_SPEED_THRESHOLD = 100;
-	const SCAN_COMPLETE_DELAY = 150;
+	// Keyboard buffer for barcode scanner (fallback mode - WebHID is faster)
+	const SCAN_SPEED_THRESHOLD = 50;  // Reduced from 100ms for faster detection
+	const SCAN_COMPLETE_DELAY = 80;   // Reduced from 150ms for faster processing
 	let scanStartTime = $state<number>(0);
 	let isScanInProgress = $state<boolean>(false);
 
 	// Start camera immediately on mount for preview (always on)
+	// Camera stream is always running - only face recognition toggles
 	async function startCameraPreview() {
 		try {
-			console.log('🎥 Starting camera preview...');
+			console.log('🎥 Starting camera stream (always on)...');
 			const stream = await navigator.mediaDevices.getUserMedia({
 				video: {
 					facingMode: 'user',
@@ -52,22 +54,23 @@
 			
 			cameraStream = stream;
 			
-			// Wait for video element to be ready
-			await new Promise<void>((resolve) => {
-				const checkVideo = () => {
-					if (videoElement) {
-						videoElement.srcObject = stream;
-						videoElement.play().then(() => {
-							cameraReady = true;
-							console.log('🎥 Camera preview active');
-							resolve();
-						});
-					} else {
-						setTimeout(checkVideo, 50);
-					}
-				};
-				checkVideo();
-			});
+			// Attach to video element when ready (non-blocking check)
+			const attachStream = () => {
+				if (videoElement) {
+					videoElement.srcObject = stream;
+					videoElement.play().then(() => {
+						cameraReady = true;
+						console.log('🎥 Camera stream active and ready');
+					}).catch(err => {
+						console.error('Video play error:', err);
+					});
+				} else {
+					// Retry quickly if element not ready yet
+					requestAnimationFrame(attachStream);
+				}
+			};
+			attachStream();
+			
 		} catch (err) {
 			console.error('🎥 Camera error:', err);
 			scanError = '❌ Camera access denied. Please allow camera access.';
@@ -79,6 +82,35 @@
 			cameraStream.getTracks().forEach(track => track.stop());
 			cameraStream = null;
 			cameraReady = false;
+		}
+	}
+
+	// Turnstile control functions
+	async function unlockTurnstile(studentId: string, studentName: string) {
+		try {
+			const res = await fetch('/api/turnstile/control', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ action: 'unlock', studentId, studentName })
+			});
+			const data = await res.json();
+			console.log('🔓 Turnstile unlock sent:', data);
+		} catch (err) {
+			console.error('❌ Turnstile control error:', err);
+		}
+	}
+
+	async function lockTurnstile() {
+		try {
+			const res = await fetch('/api/turnstile/control', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ action: 'lock' })
+			});
+			const data = await res.json();
+			console.log('🔒 Turnstile lock sent:', data);
+		} catch (err) {
+			console.error('❌ Turnstile control error:', err);
 		}
 	}
 
@@ -146,8 +178,11 @@
 		}
 	}
 
-	// Global keyboard listener for barcode scanner
+	// Global keyboard listener for barcode scanner (fallback when WebHID not connected)
 	function handleGlobalKeydown(event: KeyboardEvent) {
+		// 🚀 Skip keyboard processing if WebHID scanner is connected (faster)
+		if (scannerConnected) return;
+		
 		const now = Date.now();
 		const timeSinceLastKey = now - lastKeyTime;
 		
@@ -239,6 +274,82 @@
 		}
 	}
 	
+	// Auto-connect to previously paired HID scanner devices
+	async function autoConnectScanner() {
+		if (!('hid' in navigator)) {
+			console.log('⚠️ WebHID not supported, using keyboard mode');
+			return;
+		}
+		
+		scannerAutoConnecting = true;
+		
+		try {
+			// Get previously paired devices (no user gesture needed!)
+			const devices = await (navigator as any).hid.getDevices();
+			console.log('🔍 Found previously paired HID devices:', devices.length);
+			
+			if (devices.length > 0) {
+				// Find Yuriot ScanCode Box or any scanner
+				let scanner = devices.find((d: any) => 
+					d.productName?.toLowerCase().includes('yuriot') ||
+					d.productName?.toLowerCase().includes('scan') ||
+					d.productName?.toLowerCase().includes('barcode')
+				) || devices[0];
+				
+				if (!scanner.opened) {
+					await scanner.open();
+				}
+				
+				scannerDevice = scanner;
+				scannerConnected = true;
+				console.log('✅ Auto-connected to scanner:', scanner.productName);
+				
+				// Set up input listener
+				setupHIDListener(scanner);
+			} else {
+				console.log('📋 No previously paired devices. Keyboard mode active.');
+				console.log('💡 Connect scanner once manually, then it will auto-connect on refresh.');
+			}
+		} catch (err) {
+			console.log('⚠️ Could not auto-connect HID devices:', err);
+		} finally {
+			scannerAutoConnecting = false;
+		}
+	}
+	
+	// Set up HID input listener for scanner - FAST direct processing
+	function setupHIDListener(device: any) {
+		let hidBuffer = '';
+		
+		device.addEventListener('inputreport', (event: any) => {
+			const { data } = event;
+			for (let i = 2; i < data.byteLength; i++) {
+				const keyCode = data.getUint8(i);
+				if (keyCode === 0) continue;
+				const char = hidKeyCodeToChar(keyCode, data.getUint8(0));
+				if (char) {
+					if (char === '\n') {
+						if (hidBuffer.length > 0) {
+							// 🚀 Process immediately - no state update delay
+							const barcodeData = hidBuffer;
+							hidBuffer = '';
+							scannedInput = '';
+							processBarcodeData(barcodeData);
+						}
+					} else {
+						hidBuffer += char;
+						// Only update UI periodically, not every character
+						if (hidBuffer.length % 5 === 0 || hidBuffer.length < 5) {
+							scannedInput = hidBuffer;
+						}
+					}
+				}
+			}
+		});
+		
+		console.log('🎧 WebHID input listener attached - FAST MODE');
+	}
+
 	// USB Scanner functions
 	async function connectUSBScanner() {
 		try {
@@ -248,11 +359,24 @@
 				return;
 			}
 			
-			const devices = await (navigator as any).hid.requestDevice({ filters: [] });
+			// Request device - this REQUIRES user gesture (click)
+			const devices = await (navigator as any).hid.requestDevice({ 
+				filters: [
+					// Add common barcode scanner vendor IDs
+					{ vendorId: 0x05e0 }, // Symbol
+					{ vendorId: 0x0c2e }, // Honeywell
+					{ vendorId: 0x05f9 }, // Datalogic
+				]
+			});
 			
 			if (devices.length === 0) {
-				scanError = '❌ No scanner selected';
-				return;
+				// Try without filters
+				const allDevices = await (navigator as any).hid.requestDevice({ filters: [] });
+				if (allDevices.length === 0) {
+					scanError = '❌ No scanner selected';
+					return;
+				}
+				devices.push(...allDevices);
 			}
 			
 			const device = devices[0];
@@ -263,26 +387,9 @@
 			scanError = '';
 			console.log('✅ Scanner connected:', device.productName);
 			
-			let hidBuffer = '';
-			device.addEventListener('inputreport', (event: any) => {
-				const { data } = event;
-				for (let i = 2; i < data.byteLength; i++) {
-					const keyCode = data.getUint8(i);
-					if (keyCode === 0) continue;
-					const char = hidKeyCodeToChar(keyCode, data.getUint8(0));
-					if (char) {
-						if (char === '\n') {
-							if (hidBuffer.length > 0) {
-								processBarcodeData(hidBuffer);
-								hidBuffer = '';
-							}
-						} else {
-							hidBuffer += char;
-							scannedInput = hidBuffer;
-						}
-					}
-				}
-			});
+			// Set up listener
+			setupHIDListener(device);
+			
 		} catch (err) {
 			console.error('Scanner connection error:', err);
 			scanError = '❌ Failed to connect scanner: ' + String(err);
@@ -340,6 +447,11 @@
 		recognitionActive = false;
 		step = 'result';
 		
+		// 🚀 TRIGGER TURNSTILE - unlock on success
+		if (success && scannedStudent) {
+			unlockTurnstile(scannedStudent.id, scannedStudent.name);
+		}
+		
 		// Auto-reset after 1.5 seconds for fast transaction
 		setTimeout(() => {
 			resetVerification();
@@ -348,6 +460,9 @@
 
 	function resetVerification() {
 		console.log('🔄 Resetting verification...');
+		
+		// 🚀 LOCK TURNSTILE on reset
+		lockTurnstile();
 		
 		// Stop recognition
 		recognitionActive = false;
@@ -384,37 +499,33 @@
 		try {
 			await initDB();
 			
-			// Load face models first
-			await loadModels((progress) => {
+			// 🚀 Start camera IMMEDIATELY in parallel with model loading
+			// Camera is always on - only face recognition toggles on/off
+			const cameraPromise = startCameraPreview();
+			
+			// Load face models in parallel
+			const modelsPromise = loadModels((progress) => {
 				modelProgress = progress;
 			});
-			modelsLoading = false;
 			
-			// Start camera preview immediately after models load
-			await startCameraPreview();
-			
+			// Set up keyboard listener immediately (no waiting)
 			window.addEventListener('keydown', handleGlobalKeydown, { capture: true });
 			console.log('🔌 Global keyboard listener added');
 			
+			// Focus input immediately
 			setTimeout(() => {
 				document.getElementById('barcode-input')?.focus();
-			}, 500);
+			}, 50);
 			
-			// Auto-reconnect HID devices
-			if ('hid' in navigator) {
-				try {
-					const devices = await (navigator as any).hid.getDevices();
-					if (devices.length > 0) {
-						const device = devices[0];
-						if (!device.opened) await device.open();
-						scannerDevice = device;
-						scannerConnected = true;
-						console.log('✅ Auto-reconnected to scanner:', device.productName);
-					}
-				} catch (err) {
-					console.log('⚠️ Could not auto-reconnect to HID devices:', err);
-				}
-			}
+			// Auto-connect scanner in background (non-blocking)
+			autoConnectScanner();
+			
+			// Wait for both camera and models to be ready
+			await Promise.all([cameraPromise, modelsPromise]);
+			modelsLoading = false;
+			
+			console.log('✅ System ready - camera always on, face recognition on demand');
+			
 		} catch (err) {
 			console.error('Failed to initialize:', err);
 			studentStore.errorMessage = 'Failed to initialize system. Please refresh.';
@@ -470,8 +581,10 @@
 					<p class="stat-value">{studentStore.verificationStatus.toUpperCase()}</p>
 				</div>
 				<div class="stat-card">
-					<h3 class="stat-label">CONFIDENCE</h3>
-					<p class="stat-value">{(studentStore.confidenceScore * 100).toFixed(1)}%</p>
+					<h3 class="stat-label">CAMERA</h3>
+					<p class="stat-value" style="color: {cameraReady ? '#34c759' : '#ff3b30'}">
+						{cameraReady ? 'READY' : 'LOADING'}
+					</p>
 				</div>
 				<div class="stat-card">
 					<h3 class="stat-label">STEP</h3>
@@ -479,40 +592,24 @@
 				</div>
 				<div class="stat-card">
 					<h3 class="stat-label">SCANNER</h3>
-					<p class="stat-value" style="color: {scannerConnected ? '#34c759' : '#007aff'}">
-						{scannerConnected ? 'USB CONNECTED' : 'KEYBOARD MODE'}
+					<p class="stat-value" style="color: {scannerConnected ? '#34c759' : scannerAutoConnecting ? '#ff9500' : '#007aff'}">
+						{scannerConnected ? 'USB CONNECTED' : scannerAutoConnecting ? 'CONNECTING...' : 'KEYBOARD MODE'}
 					</p>
 				</div>
 			</section>
 
 			<!-- Verification Section -->
 			<section class="verification-section">
-				<!-- Always show camera preview -->
-				<div class="camera-preview-container">
-					<div class="video-wrapper">
-						<video 
-							bind:this={videoElement} 
-							autoplay 
-							playsinline 
-							muted
-							class="video-element"
-						>
-							<track kind="captions" src="" srclang="en" label="No captions" default />
-						</video>
-						{#if cameraReady}
-							<div class="camera-status {recognitionActive ? 'active' : 'standby'}">
-								<span class="status-dot"></span>
-								<span class="status-text">
-									{recognitionActive ? 'VERIFYING' : 'READY'}
-								</span>
-							</div>
-						{:else}
-							<div class="camera-loading">
-								<p>📷 Initializing camera...</p>
-							</div>
-						{/if}
-					</div>
-				</div>
+				<!-- Hidden video element for internal face detection processing -->
+				<video 
+					bind:this={videoElement} 
+					autoplay 
+					playsinline 
+					muted
+					class="hidden-video"
+				>
+					<track kind="captions" src="" srclang="en" label="No captions" default />
+				</video>
 
 				{#if step === 'scan'}
 					<div class="step-container">
@@ -796,72 +893,14 @@
 		padding: 32px;
 	}
 
-	/* Camera Preview - Always visible */
-	.camera-preview-container {
-		margin-bottom: 24px;
-	}
-
-	.video-wrapper {
-		position: relative;
-		width: 100%;
-		max-width: 640px;
-		margin: 0 auto;
-		border: 2px solid #383838;
-		background: #000;
-	}
-
-	.video-element {
-		width: 100%;
-		height: auto;
-		min-height: 360px;
-		display: block;
-		object-fit: cover;
-	}
-
-	.camera-status {
+	/* Hidden video for internal face detection processing */
+	.hidden-video {
 		position: absolute;
-		top: 12px;
-		right: 12px;
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding: 8px 16px;
-		border: 2px solid #383838;
-		font-family: 'JetBrains Mono', monospace;
-		font-size: 12px;
-		font-weight: bold;
-		text-transform: uppercase;
-	}
-
-	.camera-status.standby {
-		background: rgba(0, 122, 255, 0.9);
-		color: #ffffff;
-	}
-
-	.camera-status.active {
-		background: rgba(52, 199, 89, 0.9);
-		color: #ffffff;
-	}
-
-	.camera-status .status-dot {
-		width: 8px;
-		height: 8px;
-		border-radius: 50%;
-		background: #ffffff;
-	}
-
-	.camera-status.active .status-dot {
-		animation: pulse 1s ease-in-out infinite;
-	}
-
-	.camera-loading {
-		position: absolute;
-		top: 50%;
-		left: 50%;
-		transform: translate(-50%, -50%);
-		color: #ffffff;
-		font-family: 'JetBrains Mono', monospace;
-		font-size: 14px;
+		left: -9999px;
+		width: 640px;
+		height: 480px;
+		opacity: 0;
+		pointer-events: none;
 	}
 
 	.step-container {
@@ -881,26 +920,7 @@
 		text-align: center;
 	}
 
-	.btn-action {
-		padding: 16px 32px;
-		background: #34c759;
-		color: #ffffff;
-		border: 2px solid #383838;
-		font-family: 'JetBrains Mono', monospace;
-		font-size: 14px;
-		font-weight: bold;
-		text-transform: uppercase;
-		letter-spacing: 0.5px;
-		cursor: pointer;
-		transition: all 0.15s ease;
-	}
-
-	.btn-action:hover {
-		background: #28a745;
-		transform: translateY(-2px);
-		box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
-	}
-
+	/* Result Container */
 	.result-container {
 		text-align: center;
 		padding: 32px;
@@ -927,12 +947,6 @@
 		font-weight: bold;
 		margin: 0 0 16px 0;
 		color: #383838;
-	}
-	
-	.result-detail {
-		font-size: 14px;
-		color: #888888;
-		margin: 0 0 16px 0;
 	}
 
 	/* Scanner Styles */

@@ -16,7 +16,8 @@ async function ensureDB() {
 			console.log('✅ Database initialized successfully');
 		} catch (initError) {
 			console.error('❌ Database initialization failed:', initError);
-			throw initError;
+			// Don't throw - allow the app to continue without database
+			dbInitialized = true; // Mark as initialized to avoid repeated attempts
 		}
 	}
 }

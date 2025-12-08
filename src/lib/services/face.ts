@@ -1,5 +1,5 @@
-// Face detection service with Web Worker support
-// Dynamic import to avoid SSR issues
+// Face detection service - optimized for speed with WASM backend
+// WASM is faster than WebGL for face detection
 let faceapi: any = null;
 
 // Standard dimensions for all face processing
@@ -11,8 +11,26 @@ async function loadFaceAPI() {
 	if (typeof window === 'undefined') {
 		throw new Error('Face API can only be used in browser environment');
 	}
+	
+	// Import face-api (includes bundled TensorFlow.js)
 	const faceapiModule = await import('@vladmandic/face-api');
 	faceapi = faceapiModule;
+	
+	// 🚀 Use WASM backend for faster face detection
+	// WASM files are served from /static/ folder
+	if (faceapi.tf) {
+		try {
+			const { setWasmPaths } = await import('@tensorflow/tfjs-backend-wasm');
+			setWasmPaths('/'); // WASM files in static root
+			
+			await faceapi.tf.setBackend('wasm');
+			await faceapi.tf.ready();
+			console.log('✅ Face API loaded, TF backend:', faceapi.tf.getBackend());
+		} catch (err) {
+			console.warn('⚠️ WASM backend failed:', err);
+		}
+	}
+	
 	return faceapi;
 }
 
@@ -113,9 +131,10 @@ export async function detectFace(
 	// Pre-process: center-crop to 640x480 without distortion
 	const processedCanvas = centerCropToCanvas(imageElement, useGrayscale);
 	
+	// 🚀 Use smaller inputSize (320) for faster detection - still accurate for verification
 	const detection = await faceapiModule
 		.detectSingleFace(processedCanvas, new faceapiModule.TinyFaceDetectorOptions({
-			inputSize: 416, // Smaller input for faster detection
+			inputSize: 320, // Smaller = faster (320 vs 416)
 			scoreThreshold: 0.5
 		}))
 		.withFaceLandmarks()

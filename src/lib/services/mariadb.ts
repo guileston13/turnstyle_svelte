@@ -21,122 +21,127 @@ export async function getConnection() {
 }
 
 export async function initializeDatabase() {
-	// First connect without specifying a database to create it
-	const tempConfig = { ...DB_CONFIG };
-	(tempConfig as any).database = undefined;
-
-	const tempConnection = await mysql.createPool(tempConfig);
-
 	try {
-		// Create database if not exists
-		await tempConnection.execute(`
-			CREATE DATABASE IF NOT EXISTS student_verification
-			CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+		// First connect without specifying a database to create it
+		const tempConfig = { ...DB_CONFIG };
+		(tempConfig as any).database = undefined;
+
+		const tempConnection = await mysql.createPool(tempConfig);
+
+		try {
+			// Create database if not exists
+			await tempConnection.execute(`
+				CREATE DATABASE IF NOT EXISTS student_verification
+				CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+			`);
+			console.log('✅ Database created successfully');
+		} finally {
+			await tempConnection.end();
+		}
+
+		// Now connect to the created database
+		const connection = await getConnection();
+
+		await connection.execute(`USE student_verification`);
+
+		// Student Store table (for face registration lookup)
+		await connection.execute(`
+			CREATE TABLE IF NOT EXISTS student_store (
+				id VARCHAR(20) PRIMARY KEY,
+				name VARCHAR(255) NOT NULL,
+				email VARCHAR(255) UNIQUE NOT NULL,
+				phone VARCHAR(20),
+				program VARCHAR(100),
+				year INT,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+				INDEX idx_email (email)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 		`);
-		console.log('✅ Database created successfully');
-	} finally {
-		await tempConnection.end();
+
+		// Students table
+		await connection.execute(`
+			CREATE TABLE IF NOT EXISTS students (
+				id VARCHAR(20) PRIMARY KEY,
+				name VARCHAR(255) NOT NULL,
+				email VARCHAR(255) UNIQUE NOT NULL,
+				phone VARCHAR(20),
+				program VARCHAR(100),
+				year INT,
+				face_descriptor TEXT NOT NULL,
+				face_descriptor_iv VARCHAR(32) NOT NULL,
+				qr_code_data VARCHAR(255) UNIQUE NOT NULL,
+				consent_given BOOLEAN DEFAULT FALSE,
+				consent_date TIMESTAMP NULL,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+				updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+				INDEX idx_qr_code (qr_code_data),
+				INDEX idx_email (email),
+				INDEX idx_consent (consent_given)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+		`);
+
+		// Verification logs table
+		await connection.execute(`
+			CREATE TABLE IF NOT EXISTS verification_logs (
+				id INT AUTO_INCREMENT PRIMARY KEY,
+				student_id VARCHAR(20) NOT NULL,
+				verification_type ENUM('qr_scan', 'face_match', 'manual') NOT NULL,
+				success BOOLEAN NOT NULL,
+				confidence_score DECIMAL(5,4),
+				device_info TEXT,
+				ip_address VARCHAR(45),
+				location_info TEXT,
+				error_message TEXT,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+				FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
+				INDEX idx_student_id (student_id),
+				INDEX idx_created_at (created_at),
+				INDEX idx_success (success)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+		`);
+
+		// Consent audit log
+		await connection.execute(`
+			CREATE TABLE IF NOT EXISTS consent_audit (
+				id INT AUTO_INCREMENT PRIMARY KEY,
+				student_id VARCHAR(20) NOT NULL,
+				action ENUM('granted', 'revoked', 'updated') NOT NULL,
+				ip_address VARCHAR(45),
+				user_agent TEXT,
+				created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+				FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
+				INDEX idx_student_id (student_id),
+				INDEX idx_created_at (created_at)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+		`);
+
+		// Data retention policy tracking
+		await connection.execute(`
+			CREATE TABLE IF NOT EXISTS data_retention (
+				id INT AUTO_INCREMENT PRIMARY KEY,
+				student_id VARCHAR(20) NOT NULL,
+				retention_days INT DEFAULT 90,
+				scheduled_deletion_date DATE,
+				deleted BOOLEAN DEFAULT FALSE,
+				deleted_at TIMESTAMP NULL,
+				FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
+				INDEX idx_scheduled_deletion (scheduled_deletion_date),
+				INDEX idx_deleted (deleted)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+		`);
+
+		console.log('✅ Database initialized successfully');
+		console.log('📊 Tables created:');
+		console.log('  - student_store (face registration lookup)');
+		console.log('  - students (encrypted face data)');
+		console.log('  - verification_logs');
+		console.log('  - consent_audit');
+		console.log('  - data_retention');
+	} catch (error) {
+		console.warn('⚠️ Database initialization failed, but continuing:', error);
+		// Don't throw - allow the app to continue without database
 	}
-
-	// Now connect to the created database
-	const connection = await getConnection();
-
-	await connection.execute(`USE student_verification`);
-
-	// Student Store table (for face registration lookup)
-	await connection.execute(`
-		CREATE TABLE IF NOT EXISTS student_store (
-			id VARCHAR(20) PRIMARY KEY,
-			name VARCHAR(255) NOT NULL,
-			email VARCHAR(255) UNIQUE NOT NULL,
-			phone VARCHAR(20),
-			program VARCHAR(100),
-			year INT,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-			INDEX idx_email (email)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-	`);
-
-	// Students table
-	await connection.execute(`
-		CREATE TABLE IF NOT EXISTS students (
-			id VARCHAR(20) PRIMARY KEY,
-			name VARCHAR(255) NOT NULL,
-			email VARCHAR(255) UNIQUE NOT NULL,
-			phone VARCHAR(20),
-			program VARCHAR(100),
-			year INT,
-			face_descriptor TEXT NOT NULL,
-			face_descriptor_iv VARCHAR(32) NOT NULL,
-			qr_code_data VARCHAR(255) UNIQUE NOT NULL,
-			consent_given BOOLEAN DEFAULT FALSE,
-			consent_date TIMESTAMP NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-			INDEX idx_qr_code (qr_code_data),
-			INDEX idx_email (email),
-			INDEX idx_consent (consent_given)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-	`);
-
-	// Verification logs table
-	await connection.execute(`
-		CREATE TABLE IF NOT EXISTS verification_logs (
-			id INT AUTO_INCREMENT PRIMARY KEY,
-			student_id VARCHAR(20) NOT NULL,
-			verification_type ENUM('qr_scan', 'face_match', 'manual') NOT NULL,
-			success BOOLEAN NOT NULL,
-			confidence_score DECIMAL(5,4),
-			device_info TEXT,
-			ip_address VARCHAR(45),
-			location_info TEXT,
-			error_message TEXT,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
-			INDEX idx_student_id (student_id),
-			INDEX idx_created_at (created_at),
-			INDEX idx_success (success)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-	`);
-
-	// Consent audit log
-	await connection.execute(`
-		CREATE TABLE IF NOT EXISTS consent_audit (
-			id INT AUTO_INCREMENT PRIMARY KEY,
-			student_id VARCHAR(20) NOT NULL,
-			action ENUM('granted', 'revoked', 'updated') NOT NULL,
-			ip_address VARCHAR(45),
-			user_agent TEXT,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
-			INDEX idx_student_id (student_id),
-			INDEX idx_created_at (created_at)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-	`);
-
-	// Data retention policy tracking
-	await connection.execute(`
-		CREATE TABLE IF NOT EXISTS data_retention (
-			id INT AUTO_INCREMENT PRIMARY KEY,
-			student_id VARCHAR(20) NOT NULL,
-			retention_days INT DEFAULT 90,
-			scheduled_deletion_date DATE,
-			deleted BOOLEAN DEFAULT FALSE,
-			deleted_at TIMESTAMP NULL,
-			FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
-			INDEX idx_scheduled_deletion (scheduled_deletion_date),
-			INDEX idx_deleted (deleted)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-	`);
-
-	console.log('✅ Database initialized successfully');
-	console.log('📊 Tables created:');
-	console.log('  - student_store (face registration lookup)');
-	console.log('  - students (encrypted face data)');
-	console.log('  - verification_logs');
-	console.log('  - consent_audit');
-	console.log('  - data_retention');
 }
 
 export async function closeConnection() {
