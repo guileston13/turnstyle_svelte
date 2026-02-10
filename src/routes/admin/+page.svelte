@@ -260,6 +260,7 @@ async function loadStudents() {
 			const payload = {
 				id: formData.id,
 				name: formData.name,
+				email: formData.email,
 				images: capturedImages
 			};
 

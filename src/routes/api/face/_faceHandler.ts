@@ -253,16 +253,17 @@ export async function handleCheckOrientation(request: Request): Promise<Response
 export async function handleRegister(request: Request): Promise<Response> {
 	await ensureModelsLoaded();
 	try {
-		const { id, name, images } = await request.json();
+		const { id, name, email, images } = await request.json();
 
 		console.log('📥 Registration request received:', {
 			id,
 			name,
+			email,
 			hasImages: !!images,
 			imageKeys: images ? Object.keys(images) : []
 		});
 
-		if (!id || !name || !images) {
+		if (!id || !name || !email || !images) {
 			return new Response(JSON.stringify({ message: '❌ Missing required fields' }), {
 				status: 400,
 				headers: { 'Content-Type': 'application/json' }
@@ -340,24 +341,27 @@ export async function handleRegister(request: Request): Promise<Response> {
 					id, name, email, phone, program, year, 
 					face_descriptor, face_descriptor_iv,
 					qr_code_data, consent_given, consent_date
-				) VALUES (?, ?, '', '', '', NULL, ?, '', ?, 1, NOW())
-				ON DUPLICATE KEY UPDATE
-					name = VALUES(name),
-					face_descriptor = VALUES(face_descriptor),
-					qr_code_data = VALUES(qr_code_data),
-					consent_given = VALUES(consent_given),
-					consent_date = VALUES(consent_date),
-					updated_at = NOW()
+				) VALUES (?, ?, ?, NULL, NULL, NULL, ?, '', ?, 1, NOW())
 			`, [
 				id,
 				name,
+				email,
 				faceDescriptorJson,
 				qrCodeData
 			]);
 			
 			console.log(`✅ Student ${id} saved to database`);
 		} catch (dbError) {
-			console.warn('⚠️ Failed to save to database, but face registration successful:', dbError);
+			console.error('❌ Failed to save to database:', dbError);
+			// If this is a duplicate key error, throw it so the user knows
+			if (dbError && typeof dbError === 'object' && 'code' in dbError && dbError.code === 'ER_DUP_ENTRY') {
+				const errorMsg = (dbError as any).sqlMessage || '';
+				if (errorMsg.includes("for key 'PRIMARY'") || errorMsg.includes(`'${id}'`)) {
+					throw new Error(`Student ID ${id} already exists in database. Please use a unique ID.`);
+				}
+				throw new Error(`Duplicate entry detected. This student may already be registered.`);
+			}
+			console.warn('⚠️ Database error, but face registration successful:', dbError);
 		}
 
 		console.log(`✅ Student ${id} registered successfully with ${descriptors.length} face descriptors`);
