@@ -1,12 +1,24 @@
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import * as faceapi from 'face-api.js';
-import * as canvasPkg from 'canvas';
 import { getConnection } from '$lib/services/mariadb';
 
-const { Canvas, Image, ImageData, loadImage, createCanvas } = canvasPkg;
-// @ts-ignore
-faceapi.env.monkeyPatch({ Canvas, Image, ImageData });
+// Conditionally import canvas only on non-Windows platforms
+const isWindows = os.platform() === 'win32';
+let canvasPkg: any = null;
+let Canvas: any, Image: any, ImageData: any, loadImage: any, createCanvas: any;
+
+if (!isWindows) {
+	try {
+		canvasPkg = await import('canvas');
+		({ Canvas, Image, ImageData, loadImage, createCanvas } = canvasPkg);
+		// @ts-ignore
+		faceapi.env.monkeyPatch({ Canvas, Image, ImageData });
+	} catch (error) {
+		console.warn('Canvas not available, server-side face processing disabled');
+	}
+}
 
 const PROJECT_ROOT = path.resolve(process.cwd());
 const FACE_DIR = path.join(PROJECT_ROOT, 'static', 'face');
@@ -63,6 +75,11 @@ function bufferFromBase64(base64: string): Buffer {
  * Matches client-side preprocessing for accuracy
  */
 function preprocessImage(img: any): any {
+	if (!createCanvas) {
+		console.warn('Canvas not available, skipping preprocessing');
+		return img; // Return original image
+	}
+
 	const canvas = createCanvas(TARGET_WIDTH, TARGET_HEIGHT);
 	const ctx = canvas.getContext('2d');
 	
@@ -114,6 +131,10 @@ function preprocessImage(img: any): any {
 
 async function imageFromBase64(base64: string, preprocess: boolean = true): Promise<any> {
 	try {
+		if (!loadImage) {
+			throw new Error('Canvas not available for image loading');
+		}
+
 		// Ensure proper data URI - assume JPEG since client sends JPEG
 		const dataUri = base64.startsWith('data:image') ? base64 : `data:image/jpeg;base64,${base64}`;
 		console.log('🔄 Loading image from data URI, length:', dataUri.length);
@@ -251,6 +272,15 @@ export async function handleCheckOrientation(request: Request): Promise<Response
 }
 
 export async function handleRegister(request: Request): Promise<Response> {
+	if (isWindows && !canvasPkg) {
+		return new Response(JSON.stringify({ 
+			message: '❌ Server-side face processing not available on Windows ARM64. Use browser-based registration.' 
+		}), {
+			status: 503,
+			headers: { 'Content-Type': 'application/json' }
+		});
+	}
+
 	await ensureModelsLoaded();
 	try {
 		const { id, name, email, images } = await request.json();
@@ -380,6 +410,15 @@ export async function handleRegister(request: Request): Promise<Response> {
 }
 
 export async function handleRecognize(request: Request): Promise<Response> {
+	if (isWindows && !canvasPkg) {
+		return new Response(JSON.stringify({ 
+			message: '❌ Server-side face processing not available on Windows ARM64. Use browser-based recognition.' 
+		}), {
+			status: 503,
+			headers: { 'Content-Type': 'application/json' }
+		});
+	}
+
 	const requestStartTime = Date.now();
 	await ensureModelsLoaded();
 	
