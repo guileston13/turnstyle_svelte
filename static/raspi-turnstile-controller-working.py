@@ -34,8 +34,17 @@ SOLENOID_PIN = 17       # GPIO pin for solenoid relay
 LED_PIN = 27            # GPIO pin for status LED (optional)
 PORT = "5173"           # SvelteKit dev port (use 4173 for preview)
 UNLOCK_DURATION = 3     # Seconds to keep solenoid energized
-WEB_URL = f"https://172.27.44.17:{PORT}/"
-SSE_URL = f"https://172.27.44.17:{PORT}/api/turnstile"
+
+# 🔧 CHANGE THIS IP TO YOUR DEVICE'S IP ADDRESS
+# Find your IP: ifconfig (Linux) or ipconfig (Windows)
+# Supported IPs in SSL certificate:
+#   - 172.27.44.73 (current network)
+#   - 192.168.56.1 (alternative network)
+#   - 10.165.134.4 (different router)
+SERVER_IP = "172.27.44.73"  # ← CHANGE THIS based on your current network
+
+WEB_URL = f"https://{SERVER_IP}:{PORT}/"
+SSE_URL = f"https://{SERVER_IP}:{PORT}/api/turnstile"
 DEVICE_NAME = "device1"  # Default device name
 # ------------------------------------------------
 
