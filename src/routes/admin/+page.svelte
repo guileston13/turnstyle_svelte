@@ -4,6 +4,7 @@
 	import { getAllStudents, addStudent, deleteStudent, clearAllData, initDB, type Student } from '$lib/services/db';
 	import { generateQRCodeData, validateStudentID } from '$lib/services/qr';
 	import { validateName, validateEmail, validatePhone, validateProgram, validateYear, sanitizeInput } from '$lib/utils/validation';
+	import { loadModels, detectFace, getModelsLoaded, centerCropToCanvas } from '$lib/services/face';
 
 	let students = $state<Student[]>([]);
 	let loading = $state<boolean>(true);
@@ -250,18 +251,81 @@ async function loadStudents() {
 			return;
 		}
 
-		console.log('📤 Sending registration with images:', {
-			pic1Length: capturedImages.pic1.length,
-			pic2Length: capturedImages.pic2.length,
-			pic3Length: capturedImages.pic3.length
-		});
+		console.log('� Extracting face descriptors in browser...');
 
 		try {
+			// Load face detection models if not already loaded
+			if (!getModelsLoaded()) {
+				console.log('📦 Loading face detection models...');
+				await loadModels();
+			}
+
+			// Extract descriptors from each image in the browser
+			const descriptors: number[][] = [];
+			
+			for (let i = 1; i <= 3; i++) {
+				const imageKey = `pic${i}` as keyof typeof capturedImages;
+				const imageBase64 = capturedImages[imageKey];
+				
+				// Create image element from base64
+				const img = document.createElement('img');
+				await new Promise((resolve, reject) => {
+					img.onload = resolve;
+					img.onerror = reject;
+					img.src = imageBase64;
+				});
+				
+				console.log(`🔍 Image ${i} loaded: ${img.naturalWidth}x${img.naturalHeight}`);
+				
+				// Images are already grayscale+cropped from takeSnapshot()
+				// Pass false for grayscale to avoid double-processing
+				const detection = await detectFace(img, false);
+				
+				if (!detection) {
+					console.warn(`⚠️ No face detected in image ${i}, retrying with lower threshold...`);
+					// Retry: try without center-crop preprocessing (image is already 640x480)
+					const { default: faceapiModule } = await import('@vladmandic/face-api') as any;
+					const fapi = faceapiModule || await import('@vladmandic/face-api');
+					const retryDetection = await fapi
+						.detectSingleFace(img, new fapi.TinyFaceDetectorOptions({
+							inputSize: 416,
+							scoreThreshold: 0.3
+						}))
+						.withFaceLandmarks()
+						.withFaceDescriptor();
+					
+					if (!retryDetection) {
+						console.warn(`❌ Still no face in image ${i} after retry`);
+						error = `No face detected in picture ${i}. Please ensure your face is clearly visible and try again.`;
+						return;
+					}
+					
+					descriptors.push(Array.from(retryDetection.descriptor));
+					console.log(`✅ Face descriptor ${i} extracted (retry with lower threshold)`);
+				} else {
+					descriptors.push(Array.from(detection.descriptor));
+					console.log(`✅ Face descriptor ${i} extracted`);
+				}
+			}
+
+			if (descriptors.length !== 3) {
+				error = 'Failed to extract all face descriptors';
+				return;
+			}
+
+			console.log('📤 Sending registration with descriptors:', {
+				descriptorCount: descriptors.length,
+				pic1Length: capturedImages.pic1.length,
+				pic2Length: capturedImages.pic2.length,
+				pic3Length: capturedImages.pic3.length
+			});
+
 			const payload = {
 				id: formData.id,
 				name: formData.name,
 				email: formData.email,
-				images: capturedImages
+				images: capturedImages,
+				descriptors: descriptors // Send pre-computed descriptors
 			};
 
 			const res = await fetch('/api/face/register', {

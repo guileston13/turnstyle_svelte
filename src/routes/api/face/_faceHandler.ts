@@ -9,6 +9,10 @@ const isWindows = os.platform() === 'win32';
 let canvasPkg: any = null;
 let Canvas: any, Image: any, ImageData: any, loadImage: any, createCanvas: any;
 
+// Windows dev mode: simulate orientation cycling for auto-capture
+let windowsOrientationIndex = 0;
+const windowsOrientations = ['front', 'front', 'front', 'right', 'right', 'right', 'left', 'left', 'left'];
+
 if (!isWindows) {
 	try {
 		canvasPkg = await import('canvas');
@@ -222,6 +226,23 @@ function updateStudentInCache(studentId: string, descriptors: number[][], name: 
 }
 
 export async function handleCheckOrientation(request: Request): Promise<Response> {
+	// Check if canvas is available (not on Windows dev)
+	if (!loadImage || isWindows) {
+		// Cycle through orientations for Windows dev auto-capture
+		const orientation = windowsOrientations[windowsOrientationIndex % windowsOrientations.length];
+		windowsOrientationIndex++;
+		
+		console.log(`🪟 Windows dev mode: returning orientation '${orientation}' (${windowsOrientationIndex}/${windowsOrientations.length})`);
+		
+		return new Response(JSON.stringify({ 
+			orientation,
+			devMode: true
+		}), {
+			status: 200,
+			headers: { 'Content-Type': 'application/json' }
+		});
+	}
+	
 	await ensureModelsLoaded();
 	try {
 		const { image } = await request.json();
@@ -272,25 +293,17 @@ export async function handleCheckOrientation(request: Request): Promise<Response
 }
 
 export async function handleRegister(request: Request): Promise<Response> {
-	if (isWindows && !canvasPkg) {
-		return new Response(JSON.stringify({ 
-			message: '❌ Server-side face processing not available on Windows ARM64. Use browser-based registration.' 
-		}), {
-			status: 503,
-			headers: { 'Content-Type': 'application/json' }
-		});
-	}
-
-	await ensureModelsLoaded();
 	try {
-		const { id, name, email, images } = await request.json();
+		const { id, name, email, images, descriptors } = await request.json();
 
 		console.log('📥 Registration request received:', {
 			id,
 			name,
 			email,
 			hasImages: !!images,
-			imageKeys: images ? Object.keys(images) : []
+			imageKeys: images ? Object.keys(images) : [],
+			hasDescriptors: !!descriptors,
+			descriptorCount: descriptors ? descriptors.length : 0
 		});
 
 		if (!id || !name || !email || !images) {
@@ -309,37 +322,66 @@ export async function handleRegister(request: Request): Promise<Response> {
 			});
 		}
 
-		const descriptors: number[][] = [];
+		let finalDescriptors: number[][] = [];
 
-		for (let i = 1; i <= 3; i++) {
-			const imageKey = `pic${i}`;
-			if (!images[imageKey]) {
-				console.warn(`⚠️ Image ${i} not provided, skipping`);
-				continue;
-			}
-
-			console.log(`🔍 Processing image ${i}, size: ${images[imageKey].length} chars`);
-			// Use preprocessed image (center-crop + grayscale) for consistent detection
-			const img = await imageFromBase64(images[imageKey], true);
-			console.log(`✅ Image ${i} preprocessed: ${TARGET_WIDTH}x${TARGET_HEIGHT}`);
+		// If descriptors are provided (browser-side detection), use them directly
+		if (descriptors && Array.isArray(descriptors) && descriptors.length > 0) {
+			console.log('✅ Using browser-computed descriptors (works on all platforms!)');
+			finalDescriptors = descriptors;
 			
-			const detection = await faceapi
-				.detectSingleFace(img, mtcnnOptions)
-				.withFaceLandmarks()
-				.withFaceDescriptor();
-
-			if (!detection) {
-				console.warn(`⚠️ No face detected in image ${i}, skipping`);
-				continue;
+			// Save images to disk
+			for (let i = 1; i <= 3; i++) {
+				const imageKey = `pic${i}`;
+				if (images[imageKey]) {
+					const imageBuffer = bufferFromBase64(images[imageKey]);
+					fs.writeFileSync(path.join(FACE_DIR, `${id}_pic${i}.png`), imageBuffer);
+					console.log(`✅ Saved image ${i} for student ${id}`);
+				}
+			}
+		} else {
+			// Fallback: Server-side detection (only works on Raspberry Pi with canvas)
+			if (isWindows && !canvasPkg) {
+				return new Response(JSON.stringify({ 
+					message: '❌ Browser-side face detection required. Please ensure face models are loaded in browser.' 
+				}), {
+					status: 400,
+					headers: { 'Content-Type': 'application/json' }
+				});
 			}
 
-			console.log(`✅ Face detected in image ${i}`);
-			descriptors.push(Array.from(detection.descriptor));
-			const imageBuffer = bufferFromBase64(images[imageKey]);
-			fs.writeFileSync(path.join(FACE_DIR, `${id}_pic${i}.png`), imageBuffer);
+			console.log('⚠️ No descriptors provided, using server-side detection (Raspberry Pi only)');
+			await ensureModelsLoaded();
+
+			for (let i = 1; i <= 3; i++) {
+				const imageKey = `pic${i}`;
+				if (!images[imageKey]) {
+					console.warn(`⚠️ Image ${i} not provided, skipping`);
+					continue;
+				}
+
+				console.log(`🔍 Processing image ${i}, size: ${images[imageKey].length} chars`);
+				// Use preprocessed image (center-crop + grayscale) for consistent detection
+				const img = await imageFromBase64(images[imageKey], true);
+				console.log(`✅ Image ${i} preprocessed: ${TARGET_WIDTH}x${TARGET_HEIGHT}`);
+				
+				const detection = await faceapi
+					.detectSingleFace(img, mtcnnOptions)
+					.withFaceLandmarks()
+					.withFaceDescriptor();
+
+				if (!detection) {
+					console.warn(`⚠️ No face detected in image ${i}, skipping`);
+					continue;
+				}
+
+				console.log(`✅ Face detected in image ${i}`);
+				finalDescriptors.push(Array.from(detection.descriptor));
+				const imageBuffer = bufferFromBase64(images[imageKey]);
+				fs.writeFileSync(path.join(FACE_DIR, `${id}_pic${i}.png`), imageBuffer);
+			}
 		}
 
-		if (descriptors.length === 0) {
+		if (finalDescriptors.length === 0) {
 			return new Response(JSON.stringify({ message: '❌ No faces detected in any image' }), {
 				status: 400,
 				headers: { 'Content-Type': 'application/json' }
@@ -350,13 +392,13 @@ export async function handleRegister(request: Request): Promise<Response> {
 		const descriptorData = {
 			studentId: id,
 			name: name,
-			descriptors: descriptors,
+			descriptors: finalDescriptors,
 			registeredAt: new Date().toISOString()
 		};
 		fs.writeFileSync(descFile, JSON.stringify(descriptorData, null, 2));
 		
 		// 🚀 Update in-memory cache
-		updateStudentInCache(id, descriptors, name);
+		updateStudentInCache(id, finalDescriptors, name);
 
 		// Also save to students table
 		try {
@@ -364,7 +406,7 @@ export async function handleRegister(request: Request): Promise<Response> {
 			const qrCodeData = `QR-${id}-${Date.now()}`;
 			
 			// For now, store face descriptor as JSON (should be encrypted in production)
-			const faceDescriptorJson = JSON.stringify(descriptors[0]); // Store first descriptor
+			const faceDescriptorJson = JSON.stringify(finalDescriptors[0]); // Store first descriptor
 			
 			await connection.execute(`
 				INSERT INTO students (
@@ -394,7 +436,7 @@ export async function handleRegister(request: Request): Promise<Response> {
 			console.warn('⚠️ Database error, but face registration successful:', dbError);
 		}
 
-		console.log(`✅ Student ${id} registered successfully with ${descriptors.length} face descriptors`);
+		console.log(`✅ Student ${id} registered successfully with ${finalDescriptors.length} face descriptors`);
 
 		return new Response(JSON.stringify({ message: '✅ Registration successful!' }), {
 			status: 200,
