@@ -39,11 +39,20 @@
 	let scanStartTime = $state<number>(0);
 	let isScanInProgress = $state<boolean>(false);
 
-	// Start camera immediately on mount for preview (always on)
-	// Camera stream is always running - only face recognition toggles
+	// Start camera only when needed for verification (not always on)
+	// This prevents the USB camera from overheating
+	// Includes camera refresh to clear USB/wiring noise
 	async function startCameraPreview() {
+		// If camera is already running, refresh it by stopping first
+		if (cameraStream) {
+			console.log('🔄 Refreshing camera to clear USB noise...');
+			stopCameraPreview();
+			// Brief delay to let USB settle
+			await new Promise(resolve => setTimeout(resolve, 100));
+		}
+		
 		try {
-			console.log('🎥 Starting camera stream (always on)...');
+			console.log('🎥 Starting camera stream for verification...');
 			const stream = await navigator.mediaDevices.getUserMedia({
 				video: {
 					facingMode: 'user',
@@ -167,6 +176,9 @@
 			// Enable face recognition (camera is already running)
 			step = 'verification';
 			recognitionActive = true;
+			
+			// Start camera now that verification is needed
+			await startCameraPreview();
 			verificationStartTime = Date.now();
 			isProcessingScan = false;
 			
@@ -443,9 +455,10 @@
 	function handleVerificationComplete(success: boolean) {
 		console.log('🎯 Verification complete:', success ? 'SUCCESS' : 'FAILED');
 		
-		// Stop face recognition but keep camera running for next person
+		// Stop face recognition AND camera to save power
 		recognitionActive = false;
 		step = 'result';
+		stopCameraPreview();
 		
 		// 🚀 TRIGGER TURNSTILE - unlock on success
 		if (success && scannedStudent) {
@@ -472,7 +485,7 @@
 			scanTimeout = null;
 		}
 		
-		// Reset state but keep camera running
+		// Reset state - camera is already stopped from handleVerificationComplete()
 		studentStore.reset();
 		scannedStudent = null;
 		scannedInput = '';
@@ -499,11 +512,7 @@
 		try {
 			await initDB();
 			
-			// 🚀 Start camera IMMEDIATELY in parallel with model loading
-			// Camera is always on - only face recognition toggles on/off
-			const cameraPromise = startCameraPreview();
-			
-			// Load face models in parallel
+			// Load face models (camera starts later when needed)
 			const modelsPromise = loadModels((progress) => {
 				modelProgress = progress;
 			});
@@ -520,11 +529,11 @@
 			// Auto-connect scanner in background (non-blocking)
 			autoConnectScanner();
 			
-			// Wait for both camera and models to be ready
-			await Promise.all([cameraPromise, modelsPromise]);
+			// Wait for models to load
+			await modelsPromise;
 			modelsLoading = false;
 			
-			console.log('✅ System ready - camera always on, face recognition on demand');
+			console.log('✅ System ready - camera starts on demand to save power');
 			
 		} catch (err) {
 			console.error('Failed to initialize:', err);

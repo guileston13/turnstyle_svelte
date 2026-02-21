@@ -270,6 +270,14 @@ def handle_sse_event(data):
             lgpio.gpio_write(chip, LED_PIN, 0)
             time.sleep(0.1)
 
+    elif event == 'reset':
+        print("🔄 RESET - Clearing GPIO to reduce camera/wiring noise")
+        # Reset all GPIO pins to clear any electrical noise
+        lgpio.gpio_write(chip, SOLENOID_PIN, 0)
+        lgpio.gpio_write(chip, LED_PIN, 0)
+        time.sleep(0.05)  # Brief delay to settle
+        print("✅ GPIO reset complete")
+
 
 def start_program():
     """Start the turnstile controller"""
