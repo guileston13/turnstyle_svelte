@@ -618,3 +618,62 @@ export async function handleRecognize(request: Request): Promise<Response> {
 		});
 	}
 }
+
+export async function handleVerifyStudent(request: Request): Promise<Response> {
+	try {
+		const { studentId, descriptor } = await request.json();
+
+		if (!studentId || !Array.isArray(descriptor) || descriptor.length === 0) {
+			return new Response(JSON.stringify({ message: '❌ Missing studentId or descriptor' }), {
+				status: 400,
+				headers: { 'Content-Type': 'application/json' }
+			});
+		}
+
+		const cachedDescriptors = await getCachedDescriptors();
+		const studentData = cachedDescriptors.get(studentId);
+
+		if (!studentData || studentData.descriptors.length === 0) {
+			return new Response(JSON.stringify({ message: '❌ No registered face data for student' }), {
+				status: 404,
+				headers: { 'Content-Type': 'application/json' }
+			});
+		}
+
+		const queryDescriptor = new Float32Array(descriptor);
+		let bestDistance = Infinity;
+
+		for (const storedDescriptor of studentData.descriptors) {
+			let sum = 0;
+			for (let i = 0; i < queryDescriptor.length; i++) {
+				const diff = queryDescriptor[i] - storedDescriptor[i];
+				sum += diff * diff;
+			}
+
+			const distance = Math.sqrt(sum);
+			if (distance < bestDistance) {
+				bestDistance = distance;
+			}
+		}
+
+		const threshold = 0.45;
+		const match = bestDistance < threshold;
+		const confidence = Math.max(0, Math.min(1, 1 - bestDistance));
+
+		return new Response(JSON.stringify({
+			match,
+			distance: bestDistance,
+			confidence,
+			threshold
+		}), {
+			status: 200,
+			headers: { 'Content-Type': 'application/json' }
+		});
+	} catch (err) {
+		console.error('Student verification error:', err);
+		return new Response(JSON.stringify({ message: '❌ Student verification failed: ' + String(err) }), {
+			status: 500,
+			headers: { 'Content-Type': 'application/json' }
+		});
+	}
+}

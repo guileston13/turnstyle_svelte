@@ -2,8 +2,7 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { studentStore } from '../stores/student.svelte';
-	import { detectFace, compareFaces, captureFrame } from '../services/face';
-	import { ErrorType, handleError } from '../utils/error-handler';
+	import { detectFace, captureFrame } from '../services/face';
 	import type { Student } from '../services/db';
 
 	let { videoElement, student, onComplete }: { 
@@ -57,15 +56,6 @@
 			return;
 		}
 
-		if (!student.faceDescriptor) {
-			console.error('❌ Student has no face descriptor');
-			resultMessage = '✗ ERROR: No stored face data';
-			resultType = 'error';
-			stopAutoVerification();
-			if (onComplete) onComplete(false);
-			return;
-		}
-
 		// Mark as pending and update throttle time
 		matching = true;
 		lastDetectionTime = now;
@@ -86,8 +76,20 @@
 				return;
 			}
 
-			// Compare faces
-			const result = await compareFaces(detection.descriptor, student.faceDescriptor);
+			const response = await fetch('/api/face/verify', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					studentId: student.id,
+					descriptor: Array.from(detection.descriptor)
+				})
+			});
+
+			const result = await response.json();
+			if (!response.ok) {
+				throw new Error(result.message || 'Verification request failed');
+			}
+
 			studentStore.confidenceScore = result.confidence;
 
 			if (result.match) {
