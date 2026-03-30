@@ -539,20 +539,16 @@ export async function handleRecognize(request: Request): Promise<Response> {
 		// 🚀 Use cached descriptors + fast distance functions
 		const matchingStart = Date.now();
 		const cachedDescriptors = await getCachedDescriptors();
-		
+		const candidateEntries = Array.from(cachedDescriptors.entries());
+
 		// Convert query to Float32Array for fast comparison
 		const queryFloat32 = new Float32Array(queryDescriptor);
 
-		for (const [studentId, studentData] of cachedDescriptors) {
+		for (const [studentId, studentData] of candidateEntries) {
 			let studentMin = Infinity;
-			
 			for (const desc of studentData.descriptors) {
-				// 🔥 Quick reject using first 8 dimensions
 				if (quickReject(queryFloat32, desc, studentMin)) continue;
-				
-				// 🔥 Full distance with early exit
 				const dist = fastDistanceEarly(queryFloat32, desc, studentMin);
-				
 				if (dist < studentMin) {
 					studentMin = dist;
 					if (dist < bestDistance) {
@@ -564,7 +560,7 @@ export async function handleRecognize(request: Request): Promise<Response> {
 			}
 		}
 		
-		console.log(`⚡ TURBO matching (${cachedDescriptors.size} students): ${Date.now() - matchingStart}ms`);
+		console.log(`⚡ TURBO matching (${candidateEntries.length} students): ${Date.now() - matchingStart}ms`);
 
 		// Convert squared distance to regular distance for threshold comparison
 		const actualDistance = Math.sqrt(bestDistance);
