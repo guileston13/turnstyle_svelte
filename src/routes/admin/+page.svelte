@@ -4,7 +4,15 @@
 	import { getAllStudents, addStudent, deleteStudent, clearAllData, initDB, type Student } from '$lib/services/db';
 	import { generateQRCodeData, validateStudentID } from '$lib/services/qr';
 	import { validateName, validateEmail, validatePhone, validateProgram, validateYear, sanitizeInput } from '$lib/utils/validation';
-	import { loadModels, detectFace, getModelsLoaded, centerCropToCanvas } from '$lib/services/face';
+	import { loadModels, detectFace, getModelsLoaded, captureFrameAsBase64 } from '$lib/services/face';
+	import {
+		attachStreamToVideo,
+		detachVideoStream,
+		getCameraErrorMessage,
+		requestCameraStream,
+		stopMediaStream,
+		watchCameraDisconnect
+	} from '$lib/services/camera';
 
 	let students = $state<Student[]>([]);
 	let loading = $state<boolean>(true);
@@ -45,6 +53,10 @@
 	let testResult = $state<string>('');
 	let testResultColor = $state<string>('black');
 	let testImageUrl = $state<string>('');
+	let faceCameraDisconnectCleanup: (() => void) | null = null;
+	let testCameraDisconnectCleanup: (() => void) | null = null;
+	let captureSessionId = 0;
+	let autoCaptureTimeout: ReturnType<typeof setTimeout> | null = null;
 
 	onMount(async () => {
 		await initDatabase();
@@ -55,6 +67,30 @@
 		stopCamera();
 		stopTestCamera();
 	});
+
+	function clearAutoCaptureTimeout() {
+		if (autoCaptureTimeout) {
+			clearTimeout(autoCaptureTimeout);
+			autoCaptureTimeout = null;
+		}
+	}
+
+	function handleFaceCameraFailure(message: string) {
+		console.error('Face capture camera failure:', message);
+		stopCamera();
+		capturedImages = { pic1: '', pic2: '', pic3: '' };
+		faceStep = 1;
+		faceInstruction = '';
+		showFacePage = false;
+		showAddForm = true;
+		error = message;
+	}
+
+	function handleTestCameraFailure(message: string) {
+		console.error('Test camera failure:', message);
+		stopTestCamera();
+		error = message;
+	}
 
 	async function initDatabase() {
 		if (dbInitialized) return;
@@ -83,7 +119,41 @@ async function loadStudents() {
 		loading = false;
 	}
 }	// Multi-angle face capture functions
-	async function startCamera() {
+	async function startCamera(): Promise<boolean> {
+		error = null;
+		stopCamera();
+
+		if (!videoElement) {
+			await tick();
+		}
+
+		if (!videoElement) {
+			error = 'Camera preview is not ready yet. Please try again.';
+			return false;
+		}
+
+		try {
+			const mediaStream = await requestCameraStream();
+			const disconnectCleanup = watchCameraDisconnect(mediaStream, handleFaceCameraFailure);
+
+			try {
+				await attachStreamToVideo(videoElement, mediaStream);
+			} catch (cameraError) {
+				disconnectCleanup();
+				stopMediaStream(mediaStream);
+				throw cameraError;
+			}
+
+			stream = mediaStream;
+			faceCameraDisconnectCleanup = disconnectCleanup;
+			return true;
+		} catch (cameraError) {
+			error = getCameraErrorMessage(cameraError, 'Unable to start camera.');
+			stopCamera();
+			return false;
+		}
+
+		/*
 		try {
 			const attempts = [
 				{ video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } } },
@@ -112,80 +182,49 @@ async function loadStudents() {
 		} catch (err) {
 			error = 'Camera access denied: ' + String(err);
 		}
+		*/
 	}
 
 	function stopCamera() {
+		captureSessionId += 1;
+		clearAutoCaptureTimeout();
+		capturing = false;
+
+		if (faceCameraDisconnectCleanup) {
+			faceCameraDisconnectCleanup();
+			faceCameraDisconnectCleanup = null;
+		}
+
 		if (stream) {
-			stream.getTracks().forEach(track => track.stop());
+			stopMediaStream(stream);
 			stream = null;
 		}
-		if (videoElement) {
-			videoElement.srcObject = null;
-		}
+
+		detachVideoStream(videoElement);
 	}
 
 	function takeSnapshot(): string {
-		if (!videoElement || !canvasElement) return '';
-		
-		const TARGET_WIDTH = 640;
-		const TARGET_HEIGHT = 480;
-		const TARGET_ASPECT = TARGET_WIDTH / TARGET_HEIGHT;
-		
-		canvasElement.width = TARGET_WIDTH;
-		canvasElement.height = TARGET_HEIGHT;
-		
-		const ctx = canvasElement.getContext('2d');
-		if (!ctx) return '';
-		
-		// Get video dimensions
-		const videoWidth = videoElement.videoWidth || 640;
-		const videoHeight = videoElement.videoHeight || 480;
-		const videoAspect = videoWidth / videoHeight;
-		
-		// Calculate center crop dimensions
-		let cropWidth: number;
-		let cropHeight: number;
-		let cropX: number;
-		let cropY: number;
-		
-		if (videoAspect > TARGET_ASPECT) {
-			// Video is wider - crop sides
-			cropHeight = videoHeight;
-			cropWidth = videoHeight * TARGET_ASPECT;
-			cropX = (videoWidth - cropWidth) / 2;
-			cropY = 0;
-		} else {
-			// Video is taller - crop top/bottom
-			cropWidth = videoWidth;
-			cropHeight = videoWidth / TARGET_ASPECT;
-			cropX = 0;
-			cropY = (videoHeight - cropHeight) / 2;
+		if (!videoElement) return '';
+
+		try {
+			return captureFrameAsBase64(videoElement, true, 0.92);
+		} catch (cameraError) {
+			throw new Error(getCameraErrorMessage(cameraError, 'Unable to capture a frame from the camera.'));
 		}
-		
-		// Draw center-cropped and scaled image
-		ctx.drawImage(
-			videoElement,
-			cropX, cropY, cropWidth, cropHeight,
-			0, 0, TARGET_WIDTH, TARGET_HEIGHT
-		);
-		
-		// Apply grayscale for consistent face detection
-		const imageData = ctx.getImageData(0, 0, TARGET_WIDTH, TARGET_HEIGHT);
-		const data = imageData.data;
-		for (let i = 0; i < data.length; i += 4) {
-			const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-			data[i] = gray;     // R
-			data[i + 1] = gray; // G
-			data[i + 2] = gray; // B
-			// Alpha stays the same
-		}
-		ctx.putImageData(imageData, 0, 0);
-		
-		return canvasElement.toDataURL('image/jpeg', 0.92);
 	}
 
 	async function checkOrientation(): Promise<string> {
-		const frame = takeSnapshot();
+		let frame = '';
+
+		try {
+			frame = takeSnapshot();
+		} catch (cameraError) {
+			handleFaceCameraFailure(
+				getCameraErrorMessage(cameraError, 'Camera connection lost during face capture.')
+			);
+			return 'camera-error';
+		}
+
 		if (!frame) return 'none';
 
 		try {
@@ -209,7 +248,7 @@ async function loadStudents() {
 		return '';
 	}
 
-	async function autoCaptureSequence() {
+	async function autoCaptureSequence(sessionId: number) {
 		capturing = true;
 		faceStep = 1;
 		capturedImages = { pic1: '', pic2: '', pic3: '' };
@@ -220,16 +259,29 @@ async function loadStudents() {
 			3: 'left'
 		};
 
-		while (faceStep <= 3) {
+		while (faceStep <= 3 && sessionId === captureSessionId) {
 			faceInstruction = getFaceInstruction(faceStep);
 			let captured = false;
 
-			while (!captured) {
+			while (!captured && sessionId === captureSessionId) {
 				const orientation = await checkOrientation();
+				if (orientation === 'camera-error' || sessionId !== captureSessionId) {
+					capturing = false;
+					return;
+				}
 				console.log(`Step ${faceStep}: Detected orientation = ${orientation}`);
 
 				if (orientation === instructions[faceStep]) {
-					const frame = takeSnapshot();
+					let frame = '';
+					try {
+						frame = takeSnapshot();
+					} catch (cameraError) {
+						handleFaceCameraFailure(
+							getCameraErrorMessage(cameraError, 'Camera connection lost during face capture.')
+						);
+						capturing = false;
+						return;
+					}
 					capturedImages[`pic${faceStep}` as keyof typeof capturedImages] = frame;
 					console.log(`✅ Captured step ${faceStep}`);
 					captured = true;
@@ -239,6 +291,11 @@ async function loadStudents() {
 
 				await new Promise(res => setTimeout(res, 2000));
 			}
+		}
+
+		if (sessionId !== captureSessionId) {
+			capturing = false;
+			return;
 		}
 
 		capturing = false;
@@ -390,11 +447,24 @@ async function loadStudents() {
 		// Move to face capture page
 		showAddForm = false;
 		showFacePage = true;
-		
-		setTimeout(async () => {
-			await startCamera();
-			setTimeout(() => autoCaptureSequence(), 1000);
-		}, 300);
+
+		capturedImages = { pic1: '', pic2: '', pic3: '' };
+		faceInstruction = '';
+		faceStep = 1;
+
+		await tick();
+		const cameraStarted = await startCamera();
+		if (!cameraStarted) {
+			showFacePage = false;
+			showAddForm = true;
+			return;
+		}
+
+		clearAutoCaptureTimeout();
+		const sessionId = captureSessionId;
+		autoCaptureTimeout = setTimeout(() => {
+			void autoCaptureSequence(sessionId);
+		}, 1000);
 	}
 function resetForm() {
 	formData = {
@@ -407,11 +477,64 @@ function resetForm() {
 	};
 	capturedImages = { pic1: '', pic2: '', pic3: '' };
 	faceStep = 1;
+	faceInstruction = '';
+	capturing = false;
 	stopCamera();
 	showFacePage = false;
 }
 	// Test recognition functions
 	async function startTestCamera() {
+		error = null;
+		stopTestCamera();
+
+		try {
+			const mediaStream = await requestCameraStream([
+				{
+					audio: false,
+					video: {
+						facingMode: 'user',
+						width: { ideal: 640 },
+						height: { ideal: 480 }
+					}
+				},
+				{
+					audio: false,
+					video: {
+						facingMode: 'user'
+					}
+				},
+				{
+					audio: false,
+					video: true
+				}
+			]);
+
+			const disconnectCleanup = watchCameraDisconnect(mediaStream, handleTestCameraFailure);
+			testStream = mediaStream;
+			await tick();
+
+			if (!testVideoElement) {
+				disconnectCleanup();
+				stopMediaStream(mediaStream);
+				throw new Error('Test camera preview is not ready yet.');
+			}
+
+			try {
+				await attachStreamToVideo(testVideoElement, mediaStream);
+			} catch (cameraError) {
+				disconnectCleanup();
+				stopMediaStream(mediaStream);
+				throw cameraError;
+			}
+
+			testCameraDisconnectCleanup = disconnectCleanup;
+			return;
+		} catch (cameraError) {
+			error = getCameraErrorMessage(cameraError, 'Unable to start test camera.');
+			stopTestCamera();
+			return;
+		}
+		/*
 		console.log('🎥 Starting test camera...');
 		try {
 			const attempts = [
@@ -454,81 +577,32 @@ function resetForm() {
 			console.error('❌ Camera access error:', err);
 			error = 'Test camera access denied: ' + String(err);
 		}
+		*/
 	}
 
 	function stopTestCamera() {
+		if (testCameraDisconnectCleanup) {
+			testCameraDisconnectCleanup();
+			testCameraDisconnectCleanup = null;
+		}
+
 		if (testStream) {
-			testStream.getTracks().forEach(track => track.stop());
+			stopMediaStream(testStream);
 			testStream = null;
 		}
-		if (testVideoElement) {
-			testVideoElement.srcObject = null;
-		}
+
+		detachVideoStream(testVideoElement);
 	}
 
 	function takeTestSnapshot(): string {
-		if (!testVideoElement || !testCanvasElement) return '';
-		
-		// Ensure video is ready and has valid dimensions
-		if (testVideoElement.videoWidth === 0 || testVideoElement.videoHeight === 0) {
-			console.error('Video element not ready for snapshot');
+		if (!testVideoElement) return '';
+
+		try {
+			return captureFrameAsBase64(testVideoElement, true, 0.8);
+		} catch (cameraError) {
+			error = getCameraErrorMessage(cameraError, 'Unable to capture a test frame from the camera.');
 			return '';
 		}
-		
-		const TARGET_WIDTH = 640;
-		const TARGET_HEIGHT = 480;
-		const TARGET_ASPECT = TARGET_WIDTH / TARGET_HEIGHT;
-		
-		testCanvasElement.width = TARGET_WIDTH;
-		testCanvasElement.height = TARGET_HEIGHT;
-		
-		const ctx = testCanvasElement.getContext('2d');
-		if (!ctx) return '';
-		
-		// Get video dimensions
-		const videoWidth = testVideoElement.videoWidth;
-		const videoHeight = testVideoElement.videoHeight;
-		const videoAspect = videoWidth / videoHeight;
-		
-		// Calculate center crop dimensions
-		let cropWidth: number;
-		let cropHeight: number;
-		let cropX: number;
-		let cropY: number;
-		
-		if (videoAspect > TARGET_ASPECT) {
-			// Video is wider - crop sides
-			cropHeight = videoHeight;
-			cropWidth = videoHeight * TARGET_ASPECT;
-			cropX = (videoWidth - cropWidth) / 2;
-			cropY = 0;
-		} else {
-			// Video is taller - crop top/bottom
-			cropWidth = videoWidth;
-			cropHeight = videoWidth / TARGET_ASPECT;
-			cropX = 0;
-			cropY = (videoHeight - cropHeight) / 2;
-		}
-		
-		// Draw center-cropped and scaled image
-		ctx.drawImage(
-			testVideoElement,
-			cropX, cropY, cropWidth, cropHeight,
-			0, 0, TARGET_WIDTH, TARGET_HEIGHT
-		);
-		
-		// Apply grayscale for consistent face detection
-		const imageData = ctx.getImageData(0, 0, TARGET_WIDTH, TARGET_HEIGHT);
-		const data = imageData.data;
-		for (let i = 0; i < data.length; i += 4) {
-			const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-			data[i] = gray;     // R
-			data[i + 1] = gray; // G
-			data[i + 2] = gray; // B
-		}
-		ctx.putImageData(imageData, 0, 0);
-		
-		return testCanvasElement.toDataURL('image/jpeg', 0.8);
 	}
 
 	async function testRecognition() {

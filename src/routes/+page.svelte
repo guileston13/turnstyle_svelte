@@ -1,10 +1,18 @@
 <!-- Main Verification Page -->
 <script lang="ts">
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount, onDestroy, tick } from 'svelte';
 	import FaceMatch from '$lib/components/FaceMatch.svelte';
 	import ConsentDialog from '$lib/components/ConsentDialog.svelte';
 	import { studentStore } from '$lib/stores/student.svelte';
 	import { loadModels, getModelsLoaded, getLoadProgress } from '$lib/services/face';
+	import {
+		attachStreamToVideo,
+		detachVideoStream,
+		getCameraErrorMessage,
+		requestCameraStream,
+		stopMediaStream,
+		watchCameraDisconnect
+	} from '$lib/services/camera';
 	import { initDB, getStudentById } from '$lib/services/db';
 
 	let faceMatchRef = $state<any>();
@@ -32,6 +40,8 @@
 	let scanTimeout: any = null;
 	let isProcessingScan = $state<boolean>(false);
 	let scannerAutoConnecting = $state<boolean>(false);
+	let cameraDisconnectCleanup: (() => void) | null = null;
+	let resetTimeout: ReturnType<typeof setTimeout> | null = null;
 	
 	// Keyboard buffer for barcode scanner (fallback mode - WebHID is faster)
 	const SCAN_SPEED_THRESHOLD = 50;  // Reduced from 100ms for faster detection
@@ -39,10 +49,42 @@
 	let scanStartTime = $state<number>(0);
 	let isScanInProgress = $state<boolean>(false);
 
+	function clearResetTimeout() {
+		if (resetTimeout) {
+			clearTimeout(resetTimeout);
+			resetTimeout = null;
+		}
+	}
+
+	function handleCameraFailure(message: string) {
+		console.error('Camera connection issue:', message);
+		stopCameraPreview();
+		studentStore.errorMessage = '';
+
+		if (step === 'verification') {
+			resetToScan(message);
+			return;
+		}
+
+		scanError = message;
+	}
+
 	// Start camera only when needed for verification (not always on)
 	// This prevents the USB camera from overheating
 	// Includes camera refresh to clear USB/wiring noise
-	async function startCameraPreview() {
+	async function startCameraPreview(): Promise<boolean> {
+		stopCameraPreview();
+		cameraReady = false;
+
+		if (!videoElement) {
+			await tick();
+		}
+
+		if (!videoElement) {
+			scanError = 'Camera preview is not ready yet. Please try again.';
+			return false;
+		}
+
 		// If camera is already running, refresh it by stopping first
 		if (cameraStream) {
 			console.log('🔄 Refreshing camera to clear USB noise...');
@@ -53,13 +95,43 @@
 		
 		try {
 			console.log('🎥 Starting camera stream for verification...');
-			const stream = await navigator.mediaDevices.getUserMedia({
-				video: {
-					facingMode: 'user',
-					width: { ideal: 640 },
-					height: { ideal: 480 }
+			const stream = await requestCameraStream([
+				{
+					audio: false,
+					video: {
+						facingMode: 'user',
+						width: { ideal: 640 },
+						height: { ideal: 480 }
+					}
+				},
+				{
+					audio: false,
+					video: {
+						facingMode: 'user'
+					}
+				},
+				{
+					audio: false,
+					video: true
 				}
-			});
+			]);
+
+			const disconnectCleanup = watchCameraDisconnect(stream, handleCameraFailure);
+
+			try {
+				await attachStreamToVideo(videoElement, stream);
+			} catch (error) {
+				disconnectCleanup();
+				stopMediaStream(stream);
+				throw error;
+			}
+
+			cameraStream = stream;
+			cameraDisconnectCleanup = disconnectCleanup;
+			cameraReady = true;
+			scanError = '';
+			console.log('Camera stream active and ready');
+			return true;
 			
 			cameraStream = stream;
 			
@@ -81,17 +153,29 @@
 			attachStream();
 			
 		} catch (err) {
+			const message = getCameraErrorMessage(err, 'Unable to start camera preview.');
+			console.error('Camera error:', err);
+			stopCameraPreview();
+			scanError = message;
+			return false;
 			console.error('🎥 Camera error:', err);
 			scanError = '❌ Camera access denied. Please allow camera access.';
 		}
 	}
 
 	function stopCameraPreview() {
-		if (cameraStream) {
-			cameraStream.getTracks().forEach(track => track.stop());
-			cameraStream = null;
-			cameraReady = false;
+		if (cameraDisconnectCleanup) {
+			cameraDisconnectCleanup();
+			cameraDisconnectCleanup = null;
 		}
+
+		if (cameraStream) {
+			stopMediaStream(cameraStream);
+			cameraStream = null;
+		}
+
+		cameraReady = false;
+		detachVideoStream(videoElement);
 	}
 
 	// Turnstile control functions
@@ -173,12 +257,16 @@
 			scanError = '';
 			scannedInput = '';
 			
-			// Enable face recognition (camera is already running)
+			const cameraStarted = await startCameraPreview();
+			if (!cameraStarted) {
+				studentStore.reset();
+				scannedStudent = null;
+				isProcessingScan = false;
+				return;
+			}
+
 			step = 'verification';
 			recognitionActive = true;
-			
-			// Start camera now that verification is needed
-			await startCameraPreview();
 			verificationStartTime = Date.now();
 			isProcessingScan = false;
 			
@@ -466,12 +554,44 @@
 		}
 		
 		// Auto-reset after 1.5 seconds for fast transaction
-		setTimeout(() => {
+		clearResetTimeout();
+		resetTimeout = setTimeout(() => {
 			resetVerification();
 		}, 1500);
 	}
 
+	function resetToScan(message: string = '') {
+		clearResetTimeout();
+		stopCameraPreview();
+		recognitionActive = false;
+
+		if (scanTimeout) {
+			clearTimeout(scanTimeout);
+			scanTimeout = null;
+		}
+
+		studentStore.reset();
+		scannedStudent = null;
+		scannedInput = '';
+		scanBuffer = '';
+		scanError = message;
+		step = 'scan';
+		verificationStartTime = null;
+		showConsent = false;
+		isProcessingScan = false;
+		isScanInProgress = false;
+		lastKeyTime = 0;
+
+		setTimeout(() => {
+			document.getElementById('barcode-input')?.focus();
+		}, 100);
+	}
+
 	function resetVerification() {
+		console.log('Resetting verification...');
+		lockTurnstile();
+		resetToScan();
+		return;
 		console.log('🔄 Resetting verification...');
 		
 		// 🚀 LOCK TURNSTILE on reset
@@ -547,6 +667,7 @@
 			if (scanTimeout) clearTimeout(scanTimeout);
 			disconnectUSBScanner();
 		}
+		clearResetTimeout();
 		stopCameraPreview();
 	});
 </script>
@@ -680,6 +801,7 @@
 								bind:this={faceMatchRef}
 								videoElement={videoElement}
 								student={studentStore.currentStudent}
+								onCameraError={handleCameraFailure}
 								onComplete={handleVerificationComplete}
 							/>
 						{/if}

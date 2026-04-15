@@ -5,10 +5,11 @@
 	import { detectFace, captureFrame } from '../services/face';
 	import type { Student } from '../services/db';
 
-	let { videoElement, student, onComplete }: { 
+	let { videoElement, student, onComplete, onCameraError }: { 
 		videoElement: HTMLVideoElement; 
 		student: Student;
 		onComplete?: (success: boolean) => void;
+		onCameraError?: (message: string) => void;
 	} = $props();
 
 	let matching = $state<boolean>(false);
@@ -25,6 +26,17 @@
 	const VERIFICATION_INTERVAL = 500; // 500ms for faster detection (was 800ms)
 	const MIN_DETECTION_GAP = 400; // Minimum gap between detections (was 600ms)
 	const MAX_ATTEMPTS = 10; // Max attempts before failing
+
+	function isCameraRuntimeError(message: string): boolean {
+		return (
+			message.includes('camera stream') ||
+			message.includes('camera frame') ||
+			message.includes('camera preview') ||
+			message.includes('physical connection') ||
+			message.includes('no active camera stream') ||
+			message.includes('no video dimensions')
+		);
+	}
 
 	let performFaceMatch = async () => {
 		// 🎯 GUARD 1: Prevent request queue buildup
@@ -105,6 +117,18 @@
 				resultType = '';
 			}
 		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			console.error('Face match error:', err);
+
+			if (isCameraRuntimeError(message.toLowerCase())) {
+				resultMessage = 'Camera connection lost';
+				resultType = 'error';
+				verificationComplete = true;
+				studentStore.verificationStatus = 'failed';
+				stopAutoVerification();
+				if (onCameraError) setTimeout(() => onCameraError(message), 0);
+				return;
+			}
 			console.error('❌ Face match error:', err);
 		} finally {
 			matching = false;

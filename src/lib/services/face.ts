@@ -1,3 +1,5 @@
+import { hasLiveVideoTrack } from './camera';
+
 // Face detection service - optimized for speed with WASM backend
 // WASM is faster than WebGL for face detection
 let faceapi: any = null;
@@ -81,6 +83,10 @@ export function centerCropToCanvas(
 	} else {
 		srcWidth = source.width;
 		srcHeight = source.height;
+	}
+
+	if (!srcWidth || !srcHeight) {
+		throw new Error('Camera frame is not ready yet.');
 	}
 
 	// Calculate the scaling factor to fill the target (cover strategy)
@@ -188,13 +194,19 @@ export async function captureFrame(
 	videoElement: HTMLVideoElement,
 	applyGrayscale: boolean = false
 ): Promise<HTMLCanvasElement> {
+	const stream = videoElement.srcObject;
+
+	if (!(stream instanceof MediaStream)) {
+		throw new Error('Video element has no active camera stream.');
+	}
+
+	if (!hasLiveVideoTrack(stream)) {
+		throw new Error('Camera stream ended. Please check the physical connection and try again.');
+	}
+
 	// Check if video is ready
 	if (videoElement.videoWidth === 0 || videoElement.videoHeight === 0) {
 		throw new Error('Video element not ready - no video dimensions');
-	}
-
-	if (!videoElement.srcObject) {
-		throw new Error('Video element has no source');
 	}
 
 	// Use center-crop to get exactly 640x480 without distortion
@@ -210,6 +222,16 @@ export function captureFrameAsBase64(
 	applyGrayscale: boolean = false,
 	quality: number = 0.92
 ): string {
+	const stream = videoElement.srcObject;
+
+	if (!(stream instanceof MediaStream)) {
+		throw new Error('Video element has no active camera stream.');
+	}
+
+	if (!hasLiveVideoTrack(stream)) {
+		throw new Error('Camera stream ended. Please check the physical connection and try again.');
+	}
+
 	const canvas = centerCropToCanvas(videoElement, applyGrayscale);
 	return canvas.toDataURL('image/jpeg', quality);
 }
