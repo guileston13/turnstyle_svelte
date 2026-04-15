@@ -3,58 +3,105 @@ import { hasLiveVideoTrack } from './camera';
 // Face detection service - optimized for speed with WASM backend
 // WASM is faster than WebGL for face detection
 let faceapi: any = null;
+let faceapiPromise: Promise<any> | null = null;
 
 // Standard dimensions for all face processing
 const TARGET_WIDTH = 640;
 const TARGET_HEIGHT = 480;
+const MODEL_URL = '/models';
+const MODEL_NAMES = ['tinyFaceDetector', 'faceLandmark68Net', 'faceRecognitionNet'] as const;
 
 async function loadFaceAPI() {
 	if (faceapi) return faceapi;
+	if (faceapiPromise) return faceapiPromise;
 	if (typeof window === 'undefined') {
 		throw new Error('Face API can only be used in browser environment');
 	}
-	
-	// Import face-api (includes bundled TensorFlow.js)
-	const faceapiModule = await import('@vladmandic/face-api');
-	faceapi = faceapiModule;
-	
-	// 🚀 Use WASM backend for faster face detection
-	// WASM files are served from /static/ folder
-	if (faceapi.tf) {
-		try {
-			const { setWasmPaths } = await import('@tensorflow/tfjs-backend-wasm');
-			setWasmPaths('/'); // WASM files in static root
-			
-			await faceapi.tf.setBackend('wasm');
-			await faceapi.tf.ready();
-			console.log('✅ Face API loaded, TF backend:', faceapi.tf.getBackend());
-		} catch (err) {
-			console.warn('⚠️ WASM backend failed:', err);
+
+	faceapiPromise = (async () => {
+		const faceapiModule = await import('@vladmandic/face-api');
+
+		if (faceapiModule.tf) {
+			try {
+				const { setWasmPaths } = await import('@tensorflow/tfjs-backend-wasm');
+				setWasmPaths('/');
+
+				await faceapiModule.tf.setBackend('wasm');
+				await faceapiModule.tf.ready();
+				console.log('Face API loaded, TF backend:', faceapiModule.tf.getBackend());
+			} catch (err) {
+				console.warn('WASM backend failed:', err);
+			}
 		}
+
+		faceapi = faceapiModule;
+		return faceapiModule;
+	})();
+
+	try {
+		return await faceapiPromise;
+	} catch (error) {
+		faceapiPromise = null;
+		throw error;
 	}
-	
-	return faceapi;
 }
 
 let modelsLoaded = false;
 let loadProgress = 0;
+let modelsPromise: Promise<void> | null = null;
+const progressListeners = new Set<(progress: number) => void>();
+
+function emitProgress(progress: number) {
+	loadProgress = progress;
+	for (const listener of progressListeners) {
+		listener(progress);
+	}
+}
 
 export async function loadModels(onProgress?: (progress: number) => void): Promise<void> {
-	if (modelsLoaded) return;
-
-	const faceapiModule = await loadFaceAPI();
-	const MODEL_URL = '/models';
-	const models = ['tinyFaceDetector', 'faceLandmark68Net', 'faceRecognitionNet'];
-
-	for (let i = 0; i < models.length; i++) {
-		const modelName = models[i] as 'tinyFaceDetector' | 'faceRecognitionNet';
-		await faceapiModule.nets[modelName].loadFromUri(MODEL_URL);
-		loadProgress = ((i + 1) / models.length) * 100;
-		if (onProgress) onProgress(loadProgress);
+	if (onProgress) {
+		progressListeners.add(onProgress);
+		onProgress(loadProgress);
 	}
 
-	modelsLoaded = true;
-	console.log('✅ Face detection models loaded');
+	if (modelsLoaded) {
+		emitProgress(100);
+		if (onProgress) progressListeners.delete(onProgress);
+		return;
+	}
+
+	if (!modelsPromise) {
+		modelsPromise = (async () => {
+			const modelLoadStart = Date.now();
+			const faceapiModule = await loadFaceAPI();
+			let completed = 0;
+
+			await Promise.all(
+				MODEL_NAMES.map(async (modelName) => {
+					await faceapiModule.nets[modelName].loadFromUri(MODEL_URL);
+					completed += 1;
+					emitProgress((completed / MODEL_NAMES.length) * 100);
+				})
+			);
+
+			modelsLoaded = true;
+			emitProgress(100);
+			console.log(`Face detection models loaded in ${Date.now() - modelLoadStart}ms`);
+		})().catch((error) => {
+			modelsPromise = null;
+			modelsLoaded = false;
+			emitProgress(0);
+			throw error;
+		});
+	}
+
+	try {
+		await modelsPromise;
+	} finally {
+		if (onProgress) {
+			progressListeners.delete(onProgress);
+		}
+	}
 }
 
 /**
@@ -101,10 +148,14 @@ export function centerCropToCanvas(
 	// Draw the centered, cropped image
 	ctx.drawImage(
 		source,
-		offsetX / scale, offsetY / scale, // Source position (in original coords)
-		TARGET_WIDTH / scale, TARGET_HEIGHT / scale, // Source dimensions to extract
-		0, 0, // Destination position
-		TARGET_WIDTH, TARGET_HEIGHT // Destination dimensions
+		offsetX / scale,
+		offsetY / scale,
+		TARGET_WIDTH / scale,
+		TARGET_HEIGHT / scale,
+		0,
+		0,
+		TARGET_WIDTH,
+		TARGET_HEIGHT
 	);
 
 	// Apply grayscale if requested (for registration to improve TinyFace accuracy)
@@ -113,10 +164,9 @@ export function centerCropToCanvas(
 		const data = imageData.data;
 		for (let i = 0; i < data.length; i += 4) {
 			const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-			data[i] = gray;     // R
-			data[i + 1] = gray; // G
-			data[i + 2] = gray; // B
-			// Alpha stays the same
+			data[i] = gray;
+			data[i + 1] = gray;
+			data[i + 2] = gray;
 		}
 		ctx.putImageData(imageData, 0, 0);
 	}
@@ -133,16 +183,18 @@ export async function detectFace(
 	}
 
 	const faceapiModule = await loadFaceAPI();
-	
+
 	// Pre-process: center-crop to 640x480 without distortion
 	const processedCanvas = centerCropToCanvas(imageElement, useGrayscale);
-	
-	// 🚀 Use smaller inputSize (320) for faster detection - still accurate for verification
+
 	const detection = await faceapiModule
-		.detectSingleFace(processedCanvas, new faceapiModule.TinyFaceDetectorOptions({
-			inputSize: 320, // Smaller = faster (320 vs 416)
-			scoreThreshold: 0.5
-		}))
+		.detectSingleFace(
+			processedCanvas,
+			new faceapiModule.TinyFaceDetectorOptions({
+				inputSize: 320,
+				scoreThreshold: 0.5
+			})
+		)
 		.withFaceLandmarks()
 		.withFaceDescriptor();
 
@@ -158,15 +210,18 @@ export async function detectAllFaces(
 	}
 
 	const faceapiModule = await loadFaceAPI();
-	
+
 	// Pre-process: center-crop to 640x480 without distortion
 	const processedCanvas = centerCropToCanvas(imageElement, useGrayscale);
-	
+
 	const detections = await faceapiModule
-		.detectAllFaces(processedCanvas, new faceapiModule.TinyFaceDetectorOptions({
-			inputSize: 416,
-			scoreThreshold: 0.5
-		}))
+		.detectAllFaces(
+			processedCanvas,
+			new faceapiModule.TinyFaceDetectorOptions({
+				inputSize: 416,
+				scoreThreshold: 0.5
+			})
+		)
 		.withFaceLandmarks()
 		.withFaceDescriptors();
 

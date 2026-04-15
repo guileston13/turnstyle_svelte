@@ -4,7 +4,7 @@
 	import FaceMatch from '$lib/components/FaceMatch.svelte';
 	import ConsentDialog from '$lib/components/ConsentDialog.svelte';
 	import { studentStore } from '$lib/stores/student.svelte';
-	import { loadModels, getModelsLoaded, getLoadProgress } from '$lib/services/face';
+	import { loadModels } from '$lib/services/face';
 	import {
 		attachStreamToVideo,
 		detachVideoStream,
@@ -630,12 +630,12 @@
 
 	onMount(async () => {
 		try {
-			await initDB();
-			
 			// Load face models (camera starts later when needed)
 			const modelsPromise = loadModels((progress) => {
 				modelProgress = progress;
 			});
+
+			void initDB();
 			
 			// Set up keyboard listener immediately (no waiting)
 			window.addEventListener('keydown', handleGlobalKeydown, { capture: true });
@@ -647,7 +647,7 @@
 			}, 50);
 			
 			// Auto-connect scanner in background (non-blocking)
-			autoConnectScanner();
+			void autoConnectScanner();
 			
 			// Wait for models to load
 			await modelsPromise;
@@ -657,7 +657,8 @@
 			
 		} catch (err) {
 			console.error('Failed to initialize:', err);
-			studentStore.errorMessage = 'Failed to initialize system. Please refresh.';
+			modelsLoading = false;
+			studentStore.errorMessage = 'Failed to initialize face models. Please refresh.';
 		}
 	});
 
