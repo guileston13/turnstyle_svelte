@@ -1,6 +1,7 @@
 <!-- Admin Panel Page - Face Recognition with Multi-Angle Capture -->
 <script lang="ts">
 	import { onMount, onDestroy, tick } from 'svelte';
+	import { getCameraFailure, HIGH_RES_CAMERA_ATTEMPTS, KIOSK_CAMERA_ATTEMPTS, startCameraStream } from '$lib/services/camera';
 	import { getAllStudents, addStudent, deleteStudent, clearAllData, initDB, type Student } from '$lib/services/db';
 	import { generateQRCodeData, validateStudentID } from '$lib/services/qr';
 	import { validateName, validateEmail, validatePhone, validateProgram, validateYear, sanitizeInput } from '$lib/utils/validation';
@@ -155,23 +156,11 @@ async function loadStudents() {
 
 		/*
 		try {
-			const attempts = [
-				{ video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } } },
-				{ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } } },
-				{ video: { facingMode: 'user' } },
-				{ video: true }
-			];
-
-			for (const config of attempts) {
-				try {
-					stream = await navigator.mediaDevices.getUserMedia(config);
-					break;
-				} catch (err) {
-					console.warn('Camera config failed, trying next...', err);
-				}
-			}
-
-			if (!stream) throw new Error('Could not access camera');
+			stream = await startCameraStream({
+				attempts: HIGH_RES_CAMERA_ATTEMPTS,
+				retries: 1,
+				retryDelayMs: 1000
+			});
 
 			if (videoElement) {
 				videoElement.srcObject = stream;
@@ -180,7 +169,7 @@ async function loadStudents() {
 
 			console.log('✅ Camera started successfully');
 		} catch (err) {
-			error = 'Camera access denied: ' + String(err);
+			error = getCameraFailure(err).message;
 		}
 		*/
 	}
@@ -537,24 +526,11 @@ function resetForm() {
 		/*
 		console.log('🎥 Starting test camera...');
 		try {
-			const attempts = [
-				{ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } } },
-				{ video: { facingMode: 'user', width: { ideal: 320 }, height: { ideal: 240 } } },
-				{ video: { facingMode: 'user' } },
-				{ video: true }
-			];
-
-			let stream: MediaStream | null = null;
-			for (const config of attempts) {
-				try {
-					stream = await navigator.mediaDevices.getUserMedia(config);
-					break;
-				} catch (err) {
-					console.warn('Camera config failed, trying next...', err);
-				}
-			}
-
-			if (!stream) throw new Error('Could not access camera');
+			const stream = await startCameraStream({
+				attempts: KIOSK_CAMERA_ATTEMPTS,
+				retries: 1,
+				retryDelayMs: 1000
+			});
 
 			console.log('✅ Camera stream obtained:', stream);
 
@@ -575,7 +551,7 @@ function resetForm() {
 			}
 		} catch (err) {
 			console.error('❌ Camera access error:', err);
-			error = 'Test camera access denied: ' + String(err);
+			error = getCameraFailure(err).message;
 		}
 		*/
 	}

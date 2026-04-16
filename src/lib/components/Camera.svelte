@@ -1,7 +1,7 @@
 <!-- Camera Component with Motherduc Design -->
 <script lang="ts">
+	import { getCameraFailure, KIOSK_CAMERA_ATTEMPTS, startCameraStream } from '$lib/services/camera';
 	import { cameraStore } from '../stores/camera.svelte';
-	import { ErrorType, handleError } from '../utils/error-handler';
 
 	let videoElement = $state<HTMLVideoElement>();
 
@@ -16,12 +16,10 @@
 			console.log('🎥 Starting camera...');
 			cameraStore.error = null;
 
-			const mediaStream = await navigator.mediaDevices.getUserMedia({
-				video: {
-					facingMode: 'user',
-					width: { ideal: 640 },
-					height: { ideal: 480 }
-				}
+			const mediaStream = await startCameraStream({
+				attempts: KIOSK_CAMERA_ATTEMPTS,
+				retries: 1,
+				retryDelayMs: 1000
 			});
 
 			console.log('🎥 Camera stream obtained:', mediaStream);
@@ -56,8 +54,9 @@
 			// Note: No timeout set - camera stays active until explicitly stopped
 		} catch (err) {
 			console.error('🎥 Camera error:', err);
-			cameraStore.permissionStatus = 'denied';
-			cameraStore.error = handleError(ErrorType.CAMERA_DENIED);
+			const failure = getCameraFailure(err);
+			cameraStore.permissionStatus = failure.kind === 'permission' ? 'denied' : 'prompt';
+			cameraStore.error = failure.message;
 		}
 	}
 

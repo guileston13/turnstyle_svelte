@@ -3,6 +3,7 @@
 	import { onMount, onDestroy, tick } from 'svelte';
 	import FaceMatch from '$lib/components/FaceMatch.svelte';
 	import ConsentDialog from '$lib/components/ConsentDialog.svelte';
+	import { getCameraFailure, KIOSK_CAMERA_ATTEMPTS, startCameraStream } from '$lib/services/camera';
 	import { studentStore } from '$lib/stores/student.svelte';
 	import { loadModels } from '$lib/services/face';
 	import {
@@ -94,6 +95,7 @@
 		}
 		
 		try {
+<<<<<<< HEAD
 			console.log('🎥 Starting camera stream for verification...');
 			const stream = await requestCameraStream([
 				{
@@ -132,6 +134,16 @@
 			scanError = '';
 			console.log('Camera stream active and ready');
 			return true;
+=======
+			console.log('🎥 Starting camera stream (always on)...');
+			scanError = '';
+			cameraReady = false;
+			const stream = await startCameraStream({
+				attempts: KIOSK_CAMERA_ATTEMPTS,
+				retries: 1,
+				retryDelayMs: 1000
+			});
+>>>>>>> ce119d7 (Update)
 			
 			cameraStream = stream;
 			
@@ -159,7 +171,7 @@
 			scanError = message;
 			return false;
 			console.error('🎥 Camera error:', err);
-			scanError = '❌ Camera access denied. Please allow camera access.';
+			scanError = `❌ ${getCameraFailure(err).message}`;
 		}
 	}
 
