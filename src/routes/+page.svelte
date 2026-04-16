@@ -3,17 +3,18 @@
 	import { onMount, onDestroy, tick } from 'svelte';
 	import FaceMatch from '$lib/components/FaceMatch.svelte';
 	import ConsentDialog from '$lib/components/ConsentDialog.svelte';
-	import { getCameraFailure, KIOSK_CAMERA_ATTEMPTS, startCameraStream } from '$lib/services/camera';
-	import { studentStore } from '$lib/stores/student.svelte';
-	import { loadModels } from '$lib/services/face';
 	import {
 		attachStreamToVideo,
 		detachVideoStream,
 		getCameraErrorMessage,
-		requestCameraStream,
+		getCameraFailure,
+		KIOSK_CAMERA_ATTEMPTS,
+		startCameraStream,
 		stopMediaStream,
 		watchCameraDisconnect
 	} from '$lib/services/camera';
+	import { studentStore } from '$lib/stores/student.svelte';
+	import { loadModels } from '$lib/services/face';
 	import { initDB, getStudentById } from '$lib/services/db';
 
 	let faceMatchRef = $state<any>();
@@ -95,28 +96,13 @@
 		}
 		
 		try {
-<<<<<<< HEAD
 			console.log('🎥 Starting camera stream for verification...');
-			const stream = await requestCameraStream([
-				{
-					audio: false,
-					video: {
-						facingMode: 'user',
-						width: { ideal: 640 },
-						height: { ideal: 480 }
-					}
-				},
-				{
-					audio: false,
-					video: {
-						facingMode: 'user'
-					}
-				},
-				{
-					audio: false,
-					video: true
-				}
-			]);
+			scanError = '';
+			const stream = await startCameraStream({
+				attempts: KIOSK_CAMERA_ATTEMPTS,
+				retries: 1,
+				retryDelayMs: 1000
+			});
 
 			const disconnectCleanup = watchCameraDisconnect(stream, handleCameraFailure);
 
@@ -134,44 +120,15 @@
 			scanError = '';
 			console.log('Camera stream active and ready');
 			return true;
-=======
-			console.log('🎥 Starting camera stream (always on)...');
-			scanError = '';
-			cameraReady = false;
-			const stream = await startCameraStream({
-				attempts: KIOSK_CAMERA_ATTEMPTS,
-				retries: 1,
-				retryDelayMs: 1000
-			});
->>>>>>> ce119d7 (Update)
-			
-			cameraStream = stream;
-			
-			// Attach to video element when ready (non-blocking check)
-			const attachStream = () => {
-				if (videoElement) {
-					videoElement.srcObject = stream;
-					videoElement.play().then(() => {
-						cameraReady = true;
-						console.log('🎥 Camera stream active and ready');
-					}).catch(err => {
-						console.error('Video play error:', err);
-					});
-				} else {
-					// Retry quickly if element not ready yet
-					requestAnimationFrame(attachStream);
-				}
-			};
-			attachStream();
-			
 		} catch (err) {
-			const message = getCameraErrorMessage(err, 'Unable to start camera preview.');
 			console.error('Camera error:', err);
 			stopCameraPreview();
-			scanError = message;
+			const failure = getCameraFailure(err);
+			scanError =
+				failure.kind === 'unknown'
+					? getCameraErrorMessage(err, 'Unable to start camera preview.')
+					: failure.message;
 			return false;
-			console.error('🎥 Camera error:', err);
-			scanError = `❌ ${getCameraFailure(err).message}`;
 		}
 	}
 
@@ -1243,3 +1200,4 @@
 		}
 	}
 </style>
+
