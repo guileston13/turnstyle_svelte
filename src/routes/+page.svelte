@@ -44,6 +44,11 @@
 	let scannerAutoConnecting = $state<boolean>(false);
 	let cameraDisconnectCleanup: (() => void) | null = null;
 	let resetTimeout: ReturnType<typeof setTimeout> | null = null;
+	let raspiConnected = $state<boolean>(false);
+	let raspiStatusLoading = $state<boolean>(true);
+	let raspiConnectedClients = $state<number>(0);
+	let raspiStatusError = $state<string>('');
+	let raspiStatusPoll: ReturnType<typeof setInterval> | null = null;
 	
 	// Keyboard buffer for barcode scanner (fallback mode - WebHID is faster)
 	const SCAN_SPEED_THRESHOLD = 50;  // Reduced from 100ms for faster detection
@@ -597,6 +602,45 @@
 		return videoElement;
 	}
 
+	async function refreshRaspiStatus() {
+		try {
+			const response = await fetch('/api/turnstile/status', {
+				cache: 'no-store'
+			});
+
+			if (!response.ok) {
+				throw new Error(`Status request failed with ${response.status}`);
+			}
+
+			const data = await response.json();
+			raspiConnected = Boolean(data.raspiConnected);
+			raspiConnectedClients = Number(data.connectedClients ?? 0);
+			raspiStatusError = '';
+		} catch (err) {
+			console.error('Failed to refresh Raspberry Pi status:', err);
+			raspiConnected = false;
+			raspiConnectedClients = 0;
+			raspiStatusError = 'Status unavailable';
+		} finally {
+			raspiStatusLoading = false;
+		}
+	}
+
+	function getRaspiStatusLabel() {
+		if (raspiStatusLoading) return 'CHECKING...';
+		return raspiConnected ? 'CONNECTED' : 'DISCONNECTED';
+	}
+
+	function getRaspiStatusDetail() {
+		if (raspiStatusLoading) return 'Checking Raspberry Pi turnstile controller...';
+		if (raspiConnected) {
+			return raspiConnectedClients > 1
+				? `${raspiConnectedClients} Raspberry Pi clients connected`
+				: 'Raspberry Pi turnstile controller is online';
+		}
+		return raspiStatusError || 'Raspberry Pi turnstile controller is offline';
+	}
+
 	onMount(async () => {
 		try {
 			// Load face models (camera starts later when needed)
@@ -615,6 +659,11 @@
 				document.getElementById('barcode-input')?.focus();
 			}, 50);
 			
+			await refreshRaspiStatus();
+			raspiStatusPoll = setInterval(() => {
+				void refreshRaspiStatus();
+			}, 3000);
+
 			// Auto-connect scanner in background (non-blocking)
 			void autoConnectScanner();
 			
@@ -635,6 +684,7 @@
 		if (typeof window !== 'undefined') {
 			window.removeEventListener('keydown', handleGlobalKeydown, { capture: true });
 			if (scanTimeout) clearTimeout(scanTimeout);
+			if (raspiStatusPoll) clearInterval(raspiStatusPoll);
 			disconnectUSBScanner();
 		}
 		clearResetTimeout();
@@ -696,6 +746,13 @@
 						{scannerConnected ? 'USB CONNECTED' : scannerAutoConnecting ? 'CONNECTING...' : 'KEYBOARD MODE'}
 					</p>
 				</div>
+				<div class="stat-card">
+					<h3 class="stat-label">RASPI</h3>
+					<p class="stat-value status-value" style="color: {raspiConnected ? '#34c759' : raspiStatusLoading ? '#ff9500' : '#ff3b30'}">
+						{getRaspiStatusLabel()}
+					</p>
+					<p class="stat-detail">{getRaspiStatusDetail()}</p>
+				</div>
 			</section>
 
 			<!-- Verification Section -->
@@ -732,6 +789,9 @@
 								{:else}
 									Keyboard mode active
 								{/if}
+							</p>
+							<p class="scanner-detail" style="color: {raspiConnected ? '#34c759' : raspiStatusLoading ? '#ff9500' : '#ff3b30'}">
+								Raspberry Pi: {getRaspiStatusLabel()}
 							</p>
 							
 							<div class="scanner-controls">
@@ -954,7 +1014,7 @@
 	/* Stats Section */
 	.stats-section {
 		display: grid;
-		grid-template-columns: repeat(4, 1fr);
+		grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 		gap: 16px;
 		margin-bottom: 32px;
 	}
@@ -985,6 +1045,17 @@
 		font-weight: bold;
 		margin: 0;
 		color: #007aff;
+	}
+
+	.status-value {
+		font-size: 24px;
+	}
+
+	.stat-detail {
+		margin: 10px 0 0 0;
+		font-size: 12px;
+		line-height: 1.4;
+		color: #666666;
 	}
 
 	/* Verification Section */

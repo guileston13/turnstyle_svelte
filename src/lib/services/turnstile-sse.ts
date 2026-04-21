@@ -1,6 +1,8 @@
 // Turnstile SSE utilities
 // Store active SSE connections
 const clients = new Set<ReadableStreamDefaultController>();
+let lastConnectedAt: number | null = null;
+let lastDisconnectedAt: number | null = null;
 
 // Broadcast event to all connected clients (or specific device)
 export function broadcastTurnstileEvent(
@@ -21,7 +23,7 @@ export function broadcastTurnstileEvent(
 		try {
 			controller.enqueue(`data: ${payload}\n\n`);
 		} catch {
-			clients.delete(controller);
+			removeSSEClient(controller);
 		}
 	});
 }
@@ -29,11 +31,23 @@ export function broadcastTurnstileEvent(
 // Add a client to the SSE connections
 export function addSSEClient(controller: ReadableStreamDefaultController) {
 	clients.add(controller);
+	lastConnectedAt = Date.now();
 	console.log(`📡 SSE Client connected. Total clients: ${clients.size}`);
 }
 
 // Remove a client from SSE connections
 export function removeSSEClient(controller: ReadableStreamDefaultController) {
-	clients.delete(controller);
-	console.log(`📡 SSE Client disconnected. Total clients: ${clients.size}`);
+	if (clients.delete(controller)) {
+		lastDisconnectedAt = Date.now();
+		console.log(`📡 SSE Client disconnected. Total clients: ${clients.size}`);
+	}
+}
+
+export function getTurnstileConnectionStatus() {
+	return {
+		connectedClients: clients.size,
+		raspiConnected: clients.size > 0,
+		lastConnectedAt,
+		lastDisconnectedAt
+	};
 }
