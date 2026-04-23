@@ -527,7 +527,8 @@
 			unlockTurnstile(scannedStudent.id, scannedStudent.name);
 		}
 		
-		// Auto-reset after 1.5 seconds for fast transaction
+		// Auto-reset the UI after 1.5 seconds.
+		// The Raspberry Pi controls when the solenoid locks again.
 		clearResetTimeout();
 		resetTimeout = setTimeout(() => {
 			resetVerification();
@@ -563,14 +564,11 @@
 
 	function resetVerification() {
 		console.log('Resetting verification...');
-		lockTurnstile();
 		resetToScan();
 		return;
 		console.log('🔄 Resetting verification...');
 		
 		// 🚀 LOCK TURNSTILE on reset
-		lockTurnstile();
-		
 		// Stop recognition
 		recognitionActive = false;
 		
